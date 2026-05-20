@@ -32,6 +32,9 @@ from shared import (
     plot_feature_importance,
     run_model_ladder,
     rule_watcher_tipper,
+    build_random_forest,
+    build_lightgbm,
+    MODEL_BUILDERS,
     precision_at_k,
     lift_at_k,
 )
@@ -130,6 +133,7 @@ def eda(df: pd.DataFrame) -> None:
 
     # ── 2b. KEY CHART: Tipper rate by watch_bucket ────────────────────────────
     # Focus deeper EDA on segments where tipper rate AND population are both meaningful
+    # This is the most actionable chart: bar chart of tipper rate at watch_bucket 1/2/3/4.
     wb_stats = (
         df.groupby("watch_bucket")
         .agg(
@@ -440,8 +444,6 @@ def feature_importance(X_train, y_train, features: list[str]) -> dict:
     print("FEATURE IMPORTANCE — RF and LightGBM")
     print("=" * 60)
 
-    from shared import build_random_forest, build_lightgbm
-
     trained: dict = {}
 
     rf = build_random_forest()
@@ -492,7 +494,6 @@ def select_model(winner: str, probs: dict, trained_models: dict,
     if winner in trained_models:
         best_model = trained_models[winner]
     else:
-        from shared import MODEL_BUILDERS
         best_model = MODEL_BUILDERS[winner]()
         best_model.fit(X_train, y_train)
 
