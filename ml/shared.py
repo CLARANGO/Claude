@@ -62,27 +62,132 @@ ALL_FEATURES = (
 
 # ── BigQuery loader ───────────────────────────────────────────────────────────
 
-DEFAULT_TABLE = "nf-muses.muses.tfu_user_monthly"
+DEFAULT_TABLE    = "nf-muses.muses.tfu_user_monthly"
+DEFAULT_LOCATION = "asia-southeast1"
+
+# Tier → ordinal maps (real table stores these as STRING)
+TIER_MAP_AGE = {
+    "Newborn": 1, "Rising": 2, "Established": 3,
+    "Veteran": 4, "Pioneer": 5, "Legend": 6,
+}
+TIER_MAP_WATCH = {
+    "<15min": 1, "15-30min": 2, "30-45min": 3, ">45min": 4,
+    "<15 min": 1, "15-30 min": 2, "30-45 min": 3, ">45 min": 4,
+}
+TIER_MAP_SESSIONS = {
+    "low": 1, "medium": 2, "high": 3,
+    "Low": 1, "Medium": 2, "High": 3,
+}
+TIME_SEG_MAP = {"day": 0, "night": 1, "mixed": 2}
+DAY_SEG_MAP  = {"weekday": 0, "weekend": 1, "mixed": 2}
 
 
-def load_bq(project: str, table: str = DEFAULT_TABLE, months: int = 6) -> pd.DataFrame:
-    """Load tfu_user_monthly from BigQuery, last `months` months."""
+def preprocess(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalise the raw tfu_user_monthly frame:
+      - rename data_month → month
+      - derive is_donated / is_follow_bet / is_cold / tfu_gap / if_watch / total_gift_usd
+      - map STRING tiers (watch_bucket, account_age_tier, time_segment, day_segment)
+        to ordinal integers, replacing the column in place
+      - add legacy aliases (session_count, day_night_seg, weekday_weekend_seg)
+    """
+    df = df.copy()
+
+    # ── month alias ───────────────────────────────────────────────────────────
+    if "data_month" in df.columns and "month" not in df.columns:
+        df["month"] = pd.to_datetime(df["data_month"])
+    elif "month" in df.columns:
+        df["month"] = pd.to_datetime(df["month"])
+
+    # ── derived: gift USD / has_gift / has_followbet ─────────────────────────
+    if "total_gift_usd" not in df.columns:
+        df["total_gift_usd"] = (
+            df.get("total_tip_usd",   pd.Series(0, index=df.index)).fillna(0)
+            + df.get("total_box_usd", pd.Series(0, index=df.index)).fillna(0)
+            + df.get("total_wheel_usd", pd.Series(0, index=df.index)).fillna(0)
+        )
+
+    has_gift = (
+        df.get("total_tip_count",  pd.Series(0, index=df.index)).fillna(0)
+        + df.get("total_box_count",  pd.Series(0, index=df.index)).fillna(0)
+        + df.get("total_wheel_count", pd.Series(0, index=df.index)).fillna(0)
+    ) > 0
+    has_fb = df.get("total_follow_bet_count", pd.Series(0, index=df.index)).fillna(0) > 0
+
+    # ── segment flags ─────────────────────────────────────────────────────────
+    if "is_tfu" not in df.columns:
+        df["is_tfu"] = (has_gift & has_fb).astype(int)
+    df["is_donated"]    = (has_gift & ~has_fb).astype(int)
+    df["is_follow_bet"] = (has_fb   & ~has_gift).astype(int)
+    df["is_cold"]       = (~has_gift & ~has_fb).astype(int)
+    df["tfu_gap"]       = np.where(
+        df["is_tfu"] == 1, 0,
+        np.where(df["is_cold"] == 1, 2, 1),
+    )
+
+    # ── watch flag ────────────────────────────────────────────────────────────
+    df["if_watch"] = (
+        (df.get("total_watch_sec",  pd.Series(0, index=df.index)).fillna(0) > 0)
+        | (df.get("sessions_count", pd.Series(0, index=df.index)).fillna(0) > 0)
+    ).astype(int)
+
+    # ── ordinal tier maps (overwrite STRING columns with int) ─────────────────
+    if "account_age_tier" in df.columns and df["account_age_tier"].dtype == object:
+        df["account_age_tier_label"] = df["account_age_tier"]
+        df["account_age_tier"] = df["account_age_tier"].map(TIER_MAP_AGE).fillna(0).astype(int)
+
+    if "watch_bucket" in df.columns and df["watch_bucket"].dtype == object:
+        df["watch_bucket_label"] = df["watch_bucket"]
+        df["watch_bucket"] = df["watch_bucket"].map(TIER_MAP_WATCH).fillna(0).astype(int)
+
+    if "time_segment" in df.columns and df["time_segment"].dtype == object:
+        df["time_segment_label"] = df["time_segment"]
+        df["time_segment"] = (
+            df["time_segment"].str.lower().map(TIME_SEG_MAP).fillna(2).astype(int)
+        )
+
+    if "day_segment" in df.columns and df["day_segment"].dtype == object:
+        df["day_segment_label"] = df["day_segment"]
+        df["day_segment"] = (
+            df["day_segment"].str.lower().map(DAY_SEG_MAP).fillna(2).astype(int)
+        )
+
+    # ── legacy aliases (so existing analysis code keeps working) ──────────────
+    if "sessions_count" in df.columns and "session_count" not in df.columns:
+        df["session_count"] = df["sessions_count"]
+    if "time_segment" in df.columns and "day_night_seg" not in df.columns:
+        df["day_night_seg"] = df["time_segment"]
+    if "day_segment" in df.columns and "weekday_weekend_seg" not in df.columns:
+        df["weekday_weekend_seg"] = df["day_segment"]
+
+    return df
+
+
+def load_bq(
+    project: str,
+    table: str = DEFAULT_TABLE,
+    months: int = 6,
+    location: str = DEFAULT_LOCATION,
+) -> pd.DataFrame:
+    """Load tfu_user_monthly from BigQuery, last `months` months, preprocessed."""
     from google.cloud import bigquery
-    client = bigquery.Client(project=project)
+    client = bigquery.Client(project=project, location=location)
     query = f"""
         SELECT *
         FROM `{table}`
-        WHERE month >= DATE_TRUNC(
+        WHERE data_month >= DATE_TRUNC(
             DATE_SUB(CURRENT_DATE(), INTERVAL {months} MONTH), MONTH
         )
-        ORDER BY month, cust_id
+        ORDER BY data_month, cust_id
     """
-    return client.query(query).to_dataframe()
+    df = client.query(query).to_dataframe()
+    return preprocess(df)
 
 
 def load_csv(path: str) -> pd.DataFrame:
-    """Load from local CSV for offline dev / testing."""
-    return pd.read_csv(path, parse_dates=["month"])
+    """Load from local CSV for offline dev / testing — preprocessed."""
+    df = pd.read_csv(path)
+    return preprocess(df)
 
 
 # ── Train / test split ────────────────────────────────────────────────────────
