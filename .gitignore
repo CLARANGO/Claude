@@ -19,6 +19,9 @@ env/
 credentials.json
 service-account*.json
 
+# Local scratch (downloads / sandbox)
+src/
+
 # OS / editors
 .DS_Store
 Thumbs.db
