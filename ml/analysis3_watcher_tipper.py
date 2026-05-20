@@ -11,6 +11,7 @@ Train      : months 1-4   Test: month 5   (TIME-BASED — never shuffle)
 from __future__ import annotations
 
 import os
+import sys
 import warnings
 
 import matplotlib.pyplot as plt
@@ -18,6 +19,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from shared import (
     ALL_FEATURES,
     load_bq,
