@@ -29,6 +29,7 @@ from shared import (
     evaluate, evaluate_rule, compare_all,
     plot_roc, plot_lift, plot_feature_importance,
     build_random_forest, build_lightgbm,
+    to_user_level, monthly_unique_counts,
 )
 
 PROJECT = "nf-muses"
@@ -116,10 +117,13 @@ def run_eda(df: pd.DataFrame) -> None:
     df["month_label"] = df["month"].dt.to_period("M").astype(str)
 
     # ── 3a. Monthly bettor count + follow-bettor rate ─────────────────────────
+    # Each (cust_id, month) row is unique by table grain, so within a single
+    # month: nunique(cust_id) == row count. Use nunique to be explicit about
+    # the "unique users per month" semantics.
     monthly = (
         df.groupby("month_label")
         .agg(
-            bettors=("cust_id", "count"),
+            bettors=("cust_id", "nunique"),
             follow_bettors=("is_follow_bet", "sum"),
         )
         .assign(follow_rate=lambda x: x["follow_bettors"] / x["bettors"])
@@ -144,7 +148,9 @@ def run_eda(df: pd.DataFrame) -> None:
     plt.tight_layout()
     plt.show()
 
-    # ── 3b. Follow-bettor rate by segment dimensions (2×2 grid) ──────────────
+    # ── 3b. Follow-bettor rate by segment dimensions (2×2 grid, per-user) ────
+    # Per-user view: assign each user their MODE bucket across their months,
+    # then compute % of unique users in that bucket who were EVER follow-bettors.
     seg_cols = [
         ("account_age_tier",    "Account Age Tier"),
         ("watch_bucket",        "Watch Bucket"),
@@ -154,29 +160,48 @@ def run_eda(df: pd.DataFrame) -> None:
     present_segs = [(c, lbl) for c, lbl in seg_cols if c in df.columns]
 
     if present_segs:
+        # build per-user segment assignments using mode
+        user_seg = (
+            df.groupby("cust_id")
+            .agg({col: lambda s: s.mode().iloc[0] if not s.mode().empty else None
+                  for col, _ in present_segs})
+        )
+        user_seg["is_follow_bet"] = user_df.set_index("cust_id")["is_follow_bet"]
+
         fig, axes = plt.subplots(2, 2, figsize=(13, 8))
         axes_flat = axes.flatten()
         for ax, (col, label) in zip(axes_flat, present_segs):
             rate_by_seg = (
-                df.groupby(col)["is_follow_bet"]
-                .mean()
+                user_seg.groupby(col)["is_follow_bet"]
+                .agg(users="size", follow_rate="mean")
                 .reset_index()
-                .rename(columns={"is_follow_bet": "follow_rate"})
             )
             ax.bar(rate_by_seg[col].astype(str),
                    rate_by_seg["follow_rate"], color="teal")
+            for i, (n, _) in enumerate(zip(rate_by_seg["users"],
+                                            rate_by_seg["follow_rate"])):
+                ax.text(i, 0.001, f"n={n:,}", ha="center", va="bottom",
+                        fontsize=8, color="white", fontweight="bold")
             ax.set(title=f"Follow-Bettor Rate by {label}",
-                   xlabel=label, ylabel="Rate")
+                   xlabel=label, ylabel="Rate (unique users)")
             ax.yaxis.set_major_formatter(
                 plt.FuncFormatter(lambda y, _: f"{y:.1%}")
             )
         for ax in axes_flat[len(present_segs):]:
             ax.set_visible(False)
-        plt.suptitle("Follow-Bettor Rate by Segment Dimensions", y=1.01)
+        plt.suptitle("Follow-Bettor Rate by Segment Dimensions  (per unique user)",
+                     y=1.01)
         plt.tight_layout()
         plt.show()
 
     # ── 3c. Behavioral profile: follow-bettor vs regular bettor ──────────────
+    # Collapse to one row per user (ever-in-segment labels, mean features)
+    # so a user appearing in multiple months isn't counted multiple times.
+    user_df = to_user_level(df)
+    print(f"\n  Unique bettors (one row per user): {len(user_df):,}")
+    print(f"  Of which EVER follow-bettor       : {int(user_df['is_follow_bet'].sum()):,} "
+          f"({user_df['is_follow_bet'].mean():.2%})")
+
     profile_cols = [
         c for c in (
             ["total_watch_sec", "avg_watch_sec_per_session",
@@ -184,16 +209,16 @@ def run_eda(df: pd.DataFrame) -> None:
              "total_bet_count", "total_bdw_bet_count",
              "total_follow_bet_count", "session_count", "breadth_score"]
         )
-        if c in df.columns
+        if c in user_df.columns
     ]
     if profile_cols:
         profile = (
-            df.groupby("is_follow_bet")[profile_cols]
+            user_df.groupby("is_follow_bet")[profile_cols]
             .median()
             .T
             .rename(columns={0: "Regular Bettor", 1: "Follow-Bettor"})
         )
-        print("\nBehavioral profile (median) — Follow-Bettor vs Regular Bettor:")
+        print("\nBehavioral profile (per-user median) — Follow-Bettor vs Regular Bettor:")
         print(profile.to_string())
 
         # Normalised bar chart (% difference from regular bettor)
@@ -215,11 +240,11 @@ def run_eda(df: pd.DataFrame) -> None:
         plt.tight_layout()
         plt.show()
 
-    # ── 3d. Correlation heatmap ───────────────────────────────────────────────
-    numeric_cols = [c for c in ALL_FEATURES if c in df.columns
-                    and pd.api.types.is_numeric_dtype(df[c])]
+    # ── 3d. Correlation heatmap (per-user) ────────────────────────────────────
+    numeric_cols = [c for c in ALL_FEATURES if c in user_df.columns
+                    and pd.api.types.is_numeric_dtype(user_df[c])]
     heat_cols = numeric_cols + ["is_follow_bet"]
-    corr = df[heat_cols].corr()
+    corr = user_df[heat_cols].corr()
 
     fig, ax = plt.subplots(figsize=(max(10, len(heat_cols) * 0.6),
                                     max(8, len(heat_cols) * 0.55)))

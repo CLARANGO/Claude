@@ -33,6 +33,7 @@ from shared import (
     plot_lift,
     plot_feature_importance,
     run_model_ladder,
+    to_user_level,
     rule_watcher_tipper,
     build_random_forest,
     build_lightgbm,
@@ -93,11 +94,11 @@ def eda(df: pd.DataFrame) -> None:
     months = sorted(df["month"].unique())
     print(f"  Months in data: {[str(m)[:7] for m in months]}")
 
-    # ── 2a. Monthly watcher count + tipper rate trend ─────────────────────────
+    # ── 2a. Monthly watcher count + tipper rate trend (unique users/month) ───
     monthly = (
         df.groupby("month")
         .agg(
-            watcher_count=("cust_id", "count"),
+            watcher_count=("cust_id", "nunique"),
             tipper_count=("is_tipper_now", "sum"),
         )
         .reset_index()
@@ -133,14 +134,26 @@ def eda(df: pd.DataFrame) -> None:
     plt.tight_layout()
     plt.show()
 
-    # ── 2b. KEY CHART: Tipper rate by watch_bucket ────────────────────────────
-    # Focus deeper EDA on segments where tipper rate AND population are both meaningful
-    # This is the most actionable chart: bar chart of tipper rate at watch_bucket 1/2/3/4.
+    # ── 2b. KEY CHART: Tipper rate by watch_bucket (UNIQUE USERS) ─────────────
+    # Per-user view: assign each user their MODE watch_bucket across months,
+    # then compute % of unique users in that bucket who were EVER tippers.
+    # This is the most actionable chart for operators.
+    user_bucket = (
+        df.groupby("cust_id")["watch_bucket"]
+        .agg(lambda s: s.mode().iloc[0] if not s.mode().empty else s.iloc[0])
+        .rename("watch_bucket")
+        .to_frame()
+    )
+    user_ever_tipper = (
+        df.groupby("cust_id")["is_tipper_now"].max().rename("ever_tipper")
+    )
+    user_bucket = user_bucket.join(user_ever_tipper)
+
     wb_stats = (
-        df.groupby("watch_bucket")
+        user_bucket.groupby("watch_bucket")
         .agg(
-            population=("cust_id", "count"),
-            tipper_count=("is_tipper_now", "sum"),
+            population=("ever_tipper", "size"),
+            tipper_count=("ever_tipper", "sum"),
         )
         .reset_index()
     )
@@ -177,18 +190,31 @@ def eda(df: pd.DataFrame) -> None:
     print(wb_stats.to_string(index=False))
     print(f"\nActionable watch buckets config: ACTIONABLE_WATCH_BUCKETS = {ACTIONABLE_WATCH_BUCKETS}")
 
-    # ── 2c. Behavioral profile: tipper vs non-tipper in actionable segments ───
-    actionable = df[df["watch_bucket"].isin(ACTIONABLE_WATCH_BUCKETS)].copy()
+    # ── 2c. Behavioral profile: tipper vs non-tipper (per-user, actionable) ───
+    # Collapse to one row per user (ever-tipper = max of is_tipper_now,
+    # numeric features = mean across months). Then restrict to users whose
+    # MODE watch_bucket is in the actionable list.
+    user_df = to_user_level(df, extra_segment_cols=["is_tipper_now"])
+    user_mode_bucket = (
+        df.groupby("cust_id")["watch_bucket"]
+        .agg(lambda s: s.mode().iloc[0] if not s.mode().empty else s.iloc[0])
+    )
+    user_df = user_df.merge(
+        user_mode_bucket.rename("mode_watch_bucket"),
+        left_on="cust_id", right_index=True,
+    )
+    actionable = user_df[user_df["mode_watch_bucket"].isin(ACTIONABLE_WATCH_BUCKETS)].copy()
+
+    print(f"\n  Unique watchers (per-user)            : {len(user_df):,}")
+    print(f"  In actionable buckets {ACTIONABLE_WATCH_BUCKETS}            : {len(actionable):,}")
+    print(f"  Of which EVER tipper                  : {int(actionable['is_tipper_now'].sum()):,} "
+          f"({actionable['is_tipper_now'].mean():.2%})")
+
     profile_features = [
-        # watch
         "total_watch_sec", "avg_watch_sec_per_session",
-        # chat
         "total_messages", "total_chatroom_sec",
-        # gifting
         "total_tip_count", "total_gift_usd",
-        # betting
         "total_bet_count", "total_follow_bet_count",
-        # breadth / engagement
         "breadth_score", "session_count", "distinct_streamers",
     ]
     profile_features = [c for c in profile_features if c in actionable.columns]
@@ -198,8 +224,8 @@ def eda(df: pd.DataFrame) -> None:
         .median()
         .T.rename(columns={0: "Non-Tipper (median)", 1: "Tipper (median)"})
     )
-    print("\nBehavioral profile — actionable segments (watch_bucket in",
-          ACTIONABLE_WATCH_BUCKETS, "):")
+    print("\nBehavioral profile (per-user median) — actionable segments "
+          f"(mode watch_bucket in {ACTIONABLE_WATCH_BUCKETS}):")
     print(profile.round(2).to_string())
 
     fig, ax = plt.subplots(figsize=(9, 0.55 * len(profile_features) + 1.5))
@@ -219,9 +245,9 @@ def eda(df: pd.DataFrame) -> None:
     plt.tight_layout()
     plt.show()
 
-    # ── 2d. Correlation heatmap: numeric features + is_tipper_now ─────────────
-    heat_cols = [c for c in ALL_FEATURES if c in df.columns] + ["is_tipper_now"]
-    corr = df[heat_cols].fillna(0).corr()
+    # ── 2d. Correlation heatmap: per-user features + ever-tipper ──────────────
+    heat_cols = [c for c in ALL_FEATURES if c in user_df.columns] + ["is_tipper_now"]
+    corr = user_df[heat_cols].fillna(0).corr()
 
     fig, ax = plt.subplots(figsize=(14, 11))
     mask = np.triu(np.ones_like(corr, dtype=bool))

@@ -190,6 +190,65 @@ def load_csv(path: str) -> pd.DataFrame:
     return preprocess(df)
 
 
+# ── EDA helpers (handle monthly-grain duplicates) ────────────────────────────
+
+USER_SEGMENT_COLS = ["is_tfu", "is_donated", "is_follow_bet", "is_cold", "if_watch"]
+
+
+def to_user_level(
+    df: pd.DataFrame,
+    extra_segment_cols: list[str] | None = None,
+) -> pd.DataFrame:
+    """
+    Collapse monthly data → ONE row per cust_id.
+
+      - Segment 0/1 flags (USER_SEGMENT_COLS + extra_segment_cols) → MAX
+        i.e. ever-in-segment: 1 if user was in the segment ANY month
+      - All other numeric features → MEAN across observed months
+      - Adds a months_observed column
+
+    Use this for behavioral profiles, correlation heatmaps, and any
+    "one row per user" EDA. A user can carry multiple segment labels.
+    """
+    seg_cols = [c for c in USER_SEGMENT_COLS if c in df.columns]
+    if extra_segment_cols:
+        seg_cols += [c for c in extra_segment_cols if c in df.columns and c not in seg_cols]
+
+    numeric_cols = [
+        c for c in df.select_dtypes(include="number").columns
+        if c not in seg_cols and c != "cust_id"
+    ]
+
+    agg = {c: "max" for c in seg_cols}
+    agg.update({c: "mean" for c in numeric_cols})
+
+    out = df.groupby("cust_id").agg(agg)
+    out["months_observed"] = df.groupby("cust_id").size()
+    return out.reset_index()
+
+
+def monthly_unique_counts(
+    df: pd.DataFrame,
+    segment_cols: list[str] | None = None,
+) -> pd.DataFrame:
+    """
+    Per-month unique-user counts + rates per segment.
+    Columns: month, total_users, {seg}_count, {seg}_rate.
+    Each (cust_id, month) is unique by table grain, so sum == count of users.
+    """
+    if segment_cols is None:
+        segment_cols = [c for c in USER_SEGMENT_COLS if c in df.columns]
+
+    rows = []
+    for m, grp in df.groupby("month"):
+        row = {"month": m, "total_users": grp["cust_id"].nunique()}
+        for col in segment_cols:
+            row[f"{col}_count"] = int(grp[col].sum())
+            row[f"{col}_rate"]  = float(grp[col].mean())
+        rows.append(row)
+    return pd.DataFrame(rows).sort_values("month").reset_index(drop=True)
+
+
 # ── Train / test split ────────────────────────────────────────────────────────
 
 def time_split(

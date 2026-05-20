@@ -116,32 +116,49 @@ def main() -> None:
 
     print(f"  Columns : {list(raw.columns)}")
     print(f"  Months  : {sorted(raw['month'].unique())}")
-    print(f"  Total users (row count): {len(raw):,}")
+    print(f"  Total rows               : {len(raw):,}")
+    print(f"  Unique users (cust_id)   : {raw['cust_id'].nunique():,}")
 
     # Population: gap=1 (donated OR follow_bet, not both)
     pop = raw[(raw["is_donated"] == 1) | (raw["is_follow_bet"] == 1)].copy()
-    print(f"\n  Gap=1 population (donated OR follow_bet): {len(pop):,} rows")
+    print(f"\n  Gap=1 population (donated OR follow_bet)")
+    print(f"    Rows         : {len(pop):,}")
+    print(f"    Unique users : {pop['cust_id'].nunique():,}")
 
     # Sub-populations
     pop_a = pop[pop["is_donated"] == 1].copy()    # Model A: gifter only
     pop_b = pop[pop["is_follow_bet"] == 1].copy() # Model B: follow-bettor only
-    print(f"  Model A (donated==1)     : {len(pop_a):,} rows")
-    print(f"  Model B (is_follow_bet==1): {len(pop_b):,} rows")
+    print(f"\n  Model A (donated==1)")
+    print(f"    Rows         : {len(pop_a):,}")
+    print(f"    Unique users : {pop_a['cust_id'].nunique():,}")
+    print(f"  Model B (is_follow_bet==1)")
+    print(f"    Rows         : {len(pop_b):,}")
+    print(f"    Unique users : {pop_b['cust_id'].nunique():,}")
 
     # ── 2. EDA ───────────────────────────────────────────────────────────────
     section("2. EDA — BASE RATES & MONTHLY TREND")
 
+    # Row-level base rate (= ML training prior — each (user, month) row is an obs)
     br_a = pop_a[TARGET].mean()
     br_b = pop_b[TARGET].mean()
-    print(f"\n  Base rate — Model A (donated → TFU)    : {br_a:.4f}  ({br_a*100:.2f}%)")
-    print(f"  Base rate — Model B (follow_bet → TFU) : {br_b:.4f}  ({br_b*100:.2f}%)")
+    print(f"\n  Row-level base rate (ML training prior):")
+    print(f"    Model A (donated → TFU)    : {br_a:.4f}  ({br_a*100:.2f}%)")
+    print(f"    Model B (follow_bet → TFU) : {br_b:.4f}  ({br_b*100:.2f}%)")
 
-    print("\n  Monthly conversion rate (gap=1 population):")
+    # User-level: of unique users EVER in each sub-pop, what fraction were EVER TFU
+    user_a_ever_tfu = pop_a.groupby("cust_id")[TARGET].max().mean()
+    user_b_ever_tfu = pop_b.groupby("cust_id")[TARGET].max().mean()
+    print(f"\n  User-level (% of unique users ever-TFU):")
+    print(f"    Model A : {user_a_ever_tfu:.4f}  ({user_a_ever_tfu*100:.2f}%)")
+    print(f"    Model B : {user_b_ever_tfu:.4f}  ({user_b_ever_tfu*100:.2f}%)")
+
+    print("\n  Monthly conversion rate (unique users per month):")
     for segment_label, sub_df in [("Model A (donated)", pop_a), ("Model B (follow_bet)", pop_b)]:
         monthly = (
-            sub_df.groupby("month")[TARGET]
-            .agg(count="count", conversions="sum")
-            .assign(rate=lambda d: d["conversions"] / d["count"])
+            sub_df.groupby("month")
+            .agg(unique_users=("cust_id", "nunique"),
+                 conversions=(TARGET, "sum"))
+            .assign(rate=lambda d: d["conversions"] / d["unique_users"])
         )
         print(f"\n    {segment_label}")
         print(monthly.to_string())
