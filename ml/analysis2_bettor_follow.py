@@ -31,7 +31,7 @@ from shared import (
     build_random_forest, build_lightgbm,
 )
 
-PROJECT = "your_project"
+PROJECT = "nf-muses"
 CSV_FALLBACK = "tfu_user_monthly.csv"
 
 

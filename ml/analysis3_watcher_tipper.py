@@ -45,7 +45,7 @@ warnings.filterwarnings("ignore")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-PROJECT = "your_project"
+PROJECT = "nf-muses"
 CSV_FALLBACK = "tfu_user_monthly.csv"
 
 # Segments where tipper rate AND population are both meaningful.

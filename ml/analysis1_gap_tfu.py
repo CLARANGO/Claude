@@ -38,7 +38,7 @@ from shared import (
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-PROJECT = "your_project"
+PROJECT = "nf-muses"
 CSV_PATH = "tfu_user_monthly.csv"   # fallback for offline dev
 TARGET   = "is_tfu"
 MONTHS   = 6

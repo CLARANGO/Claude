@@ -23,8 +23,8 @@ import matplotlib.dates as mdates
 
 warnings.filterwarnings("ignore")
 
-PROJECT      = "your_project"
-TABLE        = "your_project.your_dataset.tfu_user_monthly"
+PROJECT      = "nf-muses"
+TABLE        = "nf-muses.muses.tfu_user_monthly"
 RESULTS_DIR  = Path(__file__).parent / "results"
 MONITOR_DIR  = Path(__file__).parent / "monitor"
 MONITOR_LOG  = MONITOR_DIR / "segment_history.csv"

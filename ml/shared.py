@@ -62,7 +62,7 @@ ALL_FEATURES = (
 
 # ── BigQuery loader ───────────────────────────────────────────────────────────
 
-DEFAULT_TABLE = "your_project.your_dataset.tfu_user_monthly"
+DEFAULT_TABLE = "nf-muses.muses.tfu_user_monthly"
 
 
 def load_bq(project: str, table: str = DEFAULT_TABLE, months: int = 6) -> pd.DataFrame:
