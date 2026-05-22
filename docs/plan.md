@@ -365,7 +365,7 @@ Implementation in `apps_script/alerts.gs` → `runDaily()`; scheduled at 08:00 T
 
 **Platform side:** all non-voided bets from `fact_live_bet` (no stream filter). `status_id` filter TBD via Phase 0 probe.
 
-**Currency:** report in **RM** (matches `tip_amount_rm` + `member_to` columns). For cross-site totals convert via `fact_live_bet` exchange rate.
+**Currency:** report in **USD**. Chatroom MYR amounts converted via `/ 4.2` (per `bq-filter-rules` skill). Jioo is already USD when `currency_id = 998`.
 
 **Scope A (per match)** — `our / platform` on the same `SabaMatchId`. Answers: "Did our streams capture more of this match?"
 

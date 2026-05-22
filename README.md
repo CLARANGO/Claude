@@ -44,7 +44,9 @@ bq --location=asia-southeast1 mk --dataset nf-bifrost:reporting
 ```
 Scheduled queries that build agg tables must also be created with `--location=asia-southeast1`.
 
-See `.claude/skills/bq-schemas/SKILL.md` for the full schema map.
+See `.claude/skills/bq-schemas/SKILL.md` for the full schema map and `.claude/skills/bq-filter-rules/SKILL.md` for required WHERE clauses, USD conversion (MYR / 4.2), and column aliases (bdw_*, *_usd, day, language).
+
+**Reporting currency: USD.** All amount columns in agg tables are MYR-converted via `/4.2` (chatroom).
 
 ## Open data questions (resolve via `sql/phase0_discovery.sql`)
 

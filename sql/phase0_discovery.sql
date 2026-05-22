@@ -1,7 +1,8 @@
 -- Region: asia-southeast1 (Singapore). Run with --location=asia-southeast1.
 -- Phase 0 — BQ Discovery (targeted probes only — schemas are known)
 -- Project: nf-bifrost
--- Run these 4 probes before locking the agg-table SQL.
+-- Probes apply bq-filter-rules: is_lic=1, is_shared IS TRUE, is_cancelled IS FALSE,
+-- chatroom (site_id != 99), non-bot streamers, non-test currency.
 
 -- ============================================================
 -- 1. Donation composition: confirm tip + box + wheel are all populated
@@ -16,7 +17,13 @@ SELECT
   SUM(box_amount_rm)    AS total_box_rm,
   SUM(wheel_amount_rm)  AS total_wheel_rm
 FROM `nf-bifrost.livestream_dm.core_streaming_performance`
-WHERE stream_start_date BETWEEN '2026-05-01' AND CURRENT_DATE('Asia/Taipei');
+WHERE is_lic = 1
+  AND is_shared IS TRUE
+  AND is_cancelled IS FALSE
+  AND site_id != 99
+  AND streamer NOT IN ('Popo','GOKU','ID_0') AND streamer != 'ID_N/A' AND streamer NOT LIKE 'ID_%'
+  AND currency != 'UUS' AND currency_id != 20
+  AND stream_start_date BETWEEN '2026-05-01' AND CURRENT_DATE('Asia/Taipei');
 
 -- ============================================================
 -- 2. fact_live_bet.follow_type distinct values

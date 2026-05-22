@@ -27,12 +27,12 @@ const CONFIG = {
 
   // The 6 KPIs we alert on. Order = how they appear in the digest.
   KPIS: [
-    { col: 'follow_streamer_bet_count',     label: 'Follow Streamer Bet Count',    fmt: 'int' },
-    { col: 'follow_streamer_bet_turnover',  label: 'Follow Streamer Bet Turnover', fmt: 'money' },
-    { col: 'bet_during_watch_count',        label: 'Bet During Watch Count',       fmt: 'int' },
-    { col: 'bet_during_watch_turnover',     label: 'Bet During Watch Turnover',    fmt: 'money' },
-    { col: 'tip_amount',                    label: 'Tip Amount',                   fmt: 'money' },
-    { col: 'tip_count',                     label: 'Tip Count',                    fmt: 'int' },
+    { col: 'follow_streamer_bet_count',          label: 'Follow Streamer Bet Count',         fmt: 'int' },
+    { col: 'follow_streamer_bet_turnover_usd',   label: 'Follow Streamer Bet Turnover',      fmt: 'money' },
+    { col: 'bdw_bet_count',                      label: 'Bet During Watch Count',            fmt: 'int' },
+    { col: 'bdw_turnover_usd',                   label: 'Bet During Watch Turnover',         fmt: 'money' },
+    { col: 'tip_amount_usd',                     label: 'Tip Amount',                        fmt: 'money' },
+    { col: 'tip_count',                          label: 'Tip Count',                         fmt: 'int' },
   ],
 
   // Min-volume gate (per session)
@@ -41,12 +41,12 @@ const CONFIG = {
 
   // Drop thresholds vs rolling-5 median; severity tiers
   THRESHOLDS: {
-    follow_streamer_bet_count:    { medium: -0.30, high: -0.50 },
-    follow_streamer_bet_turnover: { medium: -0.30, high: -0.50 },
-    bet_during_watch_count:       { medium: -0.30, high: -0.50 },
-    bet_during_watch_turnover:    { medium: -0.30, high: -0.50 },
-    tip_amount:                   { medium: -0.40, high: -0.60 },
-    tip_count:                    { medium: -0.40, high: -0.60 },
+    follow_streamer_bet_count:        { medium: -0.30, high: -0.50 },
+    follow_streamer_bet_turnover_usd: { medium: -0.30, high: -0.50 },
+    bdw_bet_count:                    { medium: -0.30, high: -0.50 },
+    bdw_turnover_usd:                 { medium: -0.30, high: -0.50 },
+    tip_amount_usd:                   { medium: -0.40, high: -0.60 },
+    tip_count:                        { medium: -0.40, high: -0.60 },
   },
 
   // Anomaly: outside median ± k·MAD
@@ -112,7 +112,7 @@ function testSlack() {
 
 function buildDigest_(sessions, yesterday, alerts) {
   const yest = sessions.filter(function(r) {
-    return formatDate_(r.session_date) === yesterday;
+    return formatDate_(r.day) === yesterday;
   });
 
   // KPI snapshot: yesterday's totals + delta vs streamer-weighted rolling-5 median
@@ -126,17 +126,17 @@ function buildDigest_(sessions, yesterday, alerts) {
   });
 
   // Top 3 streamers by NS Follow Streamer Bet Count
-  const byStreamer = groupAndSum_(yest, 'streamer_id', ['follow_streamer_bet_count', 'follow_streamer_bet_turnover', 'tip_amount']);
+  const byStreamer = groupAndSum_(yest, 'streamer_id', ['follow_streamer_bet_count', 'follow_streamer_bet_turnover_usd', 'tip_amount_usd']);
   byStreamer.sort(function(a, b) { return b.follow_streamer_bet_count - a.follow_streamer_bet_count; });
   const topStreamers = byStreamer.slice(0, 3).map(function(s, i) {
     const r = yest.find(function(x) { return x.streamer_id === s.streamer_id; }) || {};
     return '  ' + (i + 1) + '. ' + (r.streamer_name || s.streamer_id) +
            ' — ' + (s.follow_streamer_bet_count || 0) + ' follow bets, ' +
-           formatVal_(s.tip_amount, 'money') + ' tips';
+           formatVal_(s.tip_amount_usd, 'money') + ' tips';
   });
 
   // Top 3 matches by NS Follow Streamer Bet Count
-  const byMatch = groupAndSum_(yest, 'SabaMatchId', ['follow_streamer_bet_count', 'bet_during_watch_turnover']);
+  const byMatch = groupAndSum_(yest, 'SabaMatchId', ['follow_streamer_bet_count', 'bdw_turnover_usd']);
   byMatch.sort(function(a, b) { return b.follow_streamer_bet_count - a.follow_streamer_bet_count; });
   const topMatches = byMatch.slice(0, 3).map(function(m, i) {
     const r = yest.find(function(x) { return x.SabaMatchId === m.SabaMatchId; }) || {};
@@ -189,13 +189,13 @@ function evaluateAlerts_(sessions, yesterday) {
   });
   Object.keys(byStreamer).forEach(function(k) {
     byStreamer[k].sort(function(a, b) {
-      return new Date(a.session_date) - new Date(b.session_date);
+      return new Date(a.day) - new Date(b.day);
     });
   });
 
   Object.keys(byStreamer).forEach(function(streamerId) {
     const ses = byStreamer[streamerId];
-    const yestSessions = ses.filter(function(r) { return formatDate_(r.session_date) === yesterday; });
+    const yestSessions = ses.filter(function(r) { return formatDate_(r.day) === yesterday; });
 
     yestSessions.forEach(function(s) {
       // Min-volume gate
@@ -204,7 +204,7 @@ function evaluateAlerts_(sessions, yesterday) {
 
       // Rolling-5 prior window (sessions strictly before this one)
       const priors = ses
-        .filter(function(r) { return new Date(r.session_date) < new Date(s.session_date); })
+        .filter(function(r) { return new Date(r.day) < new Date(s.session_date); })
         .slice(-CONFIG.ROLLING_WINDOW);
       if (priors.length < CONFIG.MIN_SAMPLE_FOR_DELTA) return;
 
@@ -253,10 +253,10 @@ function evaluateAlerts_(sessions, yesterday) {
   // Streamer-absent alerts
   Object.keys(byStreamer).forEach(function(streamerId) {
     const ses = byStreamer[streamerId];
-    const yestSessions = ses.filter(function(r) { return formatDate_(r.session_date) === yesterday; });
+    const yestSessions = ses.filter(function(r) { return formatDate_(r.day) === yesterday; });
     if (yestSessions.length > 0) return;
     const recent = ses.filter(function(r) {
-      const daysAgo = (new Date(yesterday) - new Date(r.session_date)) / 86400000;
+      const daysAgo = (new Date(yesterday) - new Date(r.day)) / 86400000;
       return daysAgo > 0 && daysAgo <= CONFIG.ABSENT_LOOKBACK_DAYS;
     });
     if (recent.length === 0) return;
@@ -413,14 +413,14 @@ function groupAndSum_(rows, keyCol, valueCols) {
 function streamerWeightedRollingMedian_(sessions, yesterday, col) {
   const byStreamer = {};
   sessions.forEach(function(r) {
-    if (formatDate_(r.session_date) >= yesterday) return;
+    if (formatDate_(r.day) >= yesterday) return;
     if (!byStreamer[r.streamer_id]) byStreamer[r.streamer_id] = [];
     byStreamer[r.streamer_id].push(r);
   });
   let total = 0;
   Object.keys(byStreamer).forEach(function(k) {
     const arr = byStreamer[k]
-      .sort(function(a, b) { return new Date(a.session_date) - new Date(b.session_date); })
+      .sort(function(a, b) { return new Date(a.day) - new Date(b.day); })
       .slice(-CONFIG.ROLLING_WINDOW)
       .map(function(r) { return Number(r[col]) || 0; });
     if (arr.length >= CONFIG.MIN_SAMPLE_FOR_DELTA) total += median_(arr);
@@ -446,7 +446,7 @@ function formatDate_(v) {
 function formatVal_(v, fmt) {
   if (v == null || v === '') return '—';
   if (fmt === 'money') {
-    const ccy = PropertiesService.getScriptProperties().getProperty('REPORT_CURRENCY') || '';
+    const ccy = PropertiesService.getScriptProperties().getProperty('REPORT_CURRENCY') || 'USD';
     return ccy + ' ' + Math.round(Number(v)).toLocaleString();
   }
   if (fmt === 'int') return Math.round(Number(v)).toLocaleString();
