@@ -36,11 +36,11 @@ apps_script/
 
 - Source: `nf-bifrost` — `livestream_dm` + `LiveStreaming` + `VN_CTS_Data`
 - Reference: `nf-muses.muses` — TFU user-month features
-- Reporting output: `nf-bifrost.reporting.agg_*` tables
+- Reporting output: `nf-muses.reporting.agg_*` tables
 
 Before running any agg SQL: create the `reporting` dataset in `asia-southeast1`:
 ```bash
-bq --location=asia-southeast1 mk --dataset nf-bifrost:reporting
+bq --location=asia-southeast1 mk --dataset nf-muses:reporting
 ```
 Scheduled queries that build agg tables must also be created with `--location=asia-southeast1`.
 

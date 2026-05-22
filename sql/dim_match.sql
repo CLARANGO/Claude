@@ -8,7 +8,7 @@
 --
 -- TODO [Q3]: confirm the exact World Cup filter string.
 
-CREATE OR REPLACE TABLE `nf-bifrost.reporting.dim_match` AS
+CREATE OR REPLACE TABLE `nf-muses.reporting.dim_match` AS
 WITH
   base AS (
     SELECT

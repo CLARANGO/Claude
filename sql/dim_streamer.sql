@@ -3,7 +3,7 @@
 -- Source: nf-bifrost.LiveStreaming.chatroom_anchor + history from core_streaming_performance.
 -- Applies bq-filter-rules to history source (chatroom, non-bot, valid streams).
 
-CREATE OR REPLACE TABLE `nf-bifrost.reporting.dim_streamer` AS
+CREATE OR REPLACE TABLE `nf-muses.reporting.dim_streamer` AS
 WITH
   stream_stats AS (
     SELECT

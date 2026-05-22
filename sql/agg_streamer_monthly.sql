@@ -2,7 +2,7 @@
 -- agg_streamer_monthly — streamer × calendar month
 -- Includes MoM % delta. Reads from agg_session_metrics. USD-denominated.
 
-CREATE OR REPLACE TABLE `nf-bifrost.reporting.agg_streamer_monthly`
+CREATE OR REPLACE TABLE `nf-muses.reporting.agg_streamer_monthly`
 PARTITION BY month_start
 CLUSTER BY streamer_id
 AS
@@ -25,7 +25,7 @@ WITH monthly AS (
     SUM(bdw_turnover_usd)                  AS bdw_turnover_usd,
     SUM(watch_seconds_total)               AS watch_seconds_total,
     SUM(viewers)                           AS viewers
-  FROM `nf-bifrost.reporting.agg_session_metrics`
+  FROM `nf-muses.reporting.agg_session_metrics`
   GROUP BY streamer_id, month_start
 ),
 

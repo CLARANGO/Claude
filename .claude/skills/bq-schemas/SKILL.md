@@ -11,7 +11,9 @@ This skill is a reference for the BQ tables backing the streamer performance das
 - `nf-bifrost` — livestream + chatroom + bet data — **region `asia-southeast1` (Singapore)**
 - `nf-muses` — TFU feature tables — **region `asia-southeast1` (Singapore)**
 
-**All BigQuery work — datasets, scheduled queries, materialized tables — must be in `asia-southeast1`.** Cross-region joins are not allowed; the `reporting` dataset that holds our agg tables must be created in the same region.
+**All BigQuery work — datasets, scheduled queries, materialized tables — must be in `asia-southeast1`.** Cross-region joins are not allowed.
+
+**Reporting destination:** the dashboard's `agg_*` and `dim_*` tables are written to **`nf-muses.reporting.*`** (region `asia-southeast1`). Source reads from `nf-bifrost.*` are cross-project but same-region, which BigQuery allows.
 
 **Default filters:**
 - `is_cancelled = FALSE` on streams

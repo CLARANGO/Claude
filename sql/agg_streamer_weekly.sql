@@ -3,7 +3,7 @@
 -- Includes 4-week rolling median + WoW % delta. Reads from agg_session_metrics (already filtered).
 -- USD-denominated metrics (alias *_usd). stream_count uses paired anchor_id+stream_id key.
 
-CREATE OR REPLACE TABLE `nf-bifrost.reporting.agg_streamer_weekly`
+CREATE OR REPLACE TABLE `nf-muses.reporting.agg_streamer_weekly`
 PARTITION BY iso_week_start
 CLUSTER BY streamer_id
 AS
@@ -25,7 +25,7 @@ WITH weekly AS (
     SUM(bdw_turnover_usd)                  AS bdw_turnover_usd,
     SUM(watch_seconds_total)               AS watch_seconds_total,
     SUM(viewers)                           AS viewers
-  FROM `nf-bifrost.reporting.agg_session_metrics`
+  FROM `nf-muses.reporting.agg_session_metrics`
   GROUP BY streamer_id, iso_week_start
 ),
 

@@ -10,7 +10,7 @@
 --   [Q3] World Cup filter string
 --   [Q5] csp ↔ match_info join key
 
-CREATE OR REPLACE TABLE `nf-bifrost.reporting.agg_match_platform_compare`
+CREATE OR REPLACE TABLE `nf-muses.reporting.agg_match_platform_compare`
 PARTITION BY as_of_date
 CLUSTER BY SabaMatchId
 AS
