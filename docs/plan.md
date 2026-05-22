@@ -7,7 +7,7 @@ Clara (data analysis) needs a dashboard tracking streamer performance during the
 2. **Weekly + monthly streamer performance** (Mon–Sun ISO weeks; calendar months)
 3. **Our product vs Platform comparison** (platform only exposes bet turnover + count)
 
-Source: existing BigQuery tables (schemas unknown — needs Phase 0 discovery).
+Source: existing BigQuery tables (schemas resolved — see "BQ Schema Map" below).
 Output: BQ materialized agg tables → Google Sheets → Looker Studio.
 Refresh: daily batch, 06:00 Taipei (UTC+8).
 Audience: ops team + management (view-only).
@@ -102,32 +102,132 @@ Definitions:
 
 ---
 
-## Phase 0 — BQ Discovery (must run first)
+## BQ Schema Map (resolved from claude.ai skill)
 
-Tables exist but schemas are unknown. Output of this phase is a schema map + gap report.
+**Project:** `nf-bifrost` (chatroom/livestream data) + `nf-muses` (TFU features, region `asia-southeast1`).
 
-1. `INFORMATION_SCHEMA.TABLES` + `COLUMNS` on candidate dataset to enumerate tables.
-2. For each candidate table (likely names: `streams`, `sessions`, `bets`, `recommendations`, `follows`, `donations`, `tips`, `watch_sessions`, `users`, `matches`):
-   - Column list + types
-   - Row count + date range
-   - Sample 5 rows
-   - Identify primary key + join keys
-3. Map BQ entities to required metrics:
+### Primary fact tables
 
-| Metric area | Likely table | Required columns |
+| Table | Grain | Used for |
 |---|---|---|
-| Stream sessions | streams/sessions | stream_id, streamer_id, match_id, start_ts, end_ts |
-| Bets (4 categories) | bets | bet_id, user_id, stream_id, match_id, category, turnover, placed_ts, status |
-| Streamer recommendations | recommendations | rec_id, streamer_id, stream_id, match_id, pick, shown_ts |
-| Recommend-bet conversions | bets ↔ recommendations | bet_id linked to rec_id, OR bet.context='streamer_rec' flag |
-| Watch sessions | watch_sessions | user_id, stream_id, watch_start_ts, watch_end_ts |
-| Follows (category dim) | follows or bet.category | user/system/streamer flag |
-| Donations + Tips | donations | donation_id, user_id, stream_id, amount, type, created_ts |
-| Platform bets | bets (no stream filter) | match_id, turnover, count, placed_ts |
-| Match dim | matches | match_id, kickoff_ts, team_home, team_away, stage |
+| `nf-bifrost.livestream_dm.core_streaming_performance` | cust_id × stream_id (already aggregated per customer-session) | **All session-level NS/L1/L2 metrics.** This is the workhorse — most of the agg work is already done. |
+| `nf-bifrost.livestream_dm.fact_live_bet` | trans_id (per bet) | Platform-wide bet totals (Scope A & B comparison); the `follow_type` column gives the 4 bet categories at row level. |
+| `nf-bifrost.livestream_dm.fact_tip_record` | record_id (per tip) | Tip drill-down if needed; not required since core_streaming_performance has tip totals. |
+| `nf-bifrost.LiveStreaming.chatroom_recommend` | streamer × match × pick | **L1 "Recommend Bet Count"** — `RecommendCount` is bets on the streamer's recommended pick. |
 
-4. **Gap report** — flag any metric not computable from existing tables.
-5. If no World Cup fixtures table exists, build `dim_match` from FIFA fixture list (~64 matches).
+### Dimension tables
+
+| Table | Use |
+|---|---|
+| `nf-bifrost.LiveStreaming.match_info` | dim_match — has `SabaMatchId`, `KickOffTime`, `League`, `LeagueGroup`, `HomeCnName`, `AwayCnName`, `isCancelled`. **No stage column** — needs manual tagging for group/R16/QF/SF/final. |
+| `nf-bifrost.LiveStreaming.chatroom_anchor` | dim_streamer — `Id` (= anchor_id), `Name`, `Provider`, `Language`, `Status`. |
+| `nf-bifrost.VN_CTS_Data.CTSCustomer` | User attrs if needed. Join key is `CustID` (capital). `CreatedDate` is UTC-4 → convert with `DATETIME(TIMESTAMP(CreatedDate,'UTC-4'),'Asia/Taipei')`. Dedup with `QUALIFY ROW_NUMBER() OVER (PARTITION BY CustID ORDER BY ModifiedTime DESC) = 1`. |
+
+### Column-to-metric mapping (in core_streaming_performance)
+
+```
+NS Follow Streamer Bet Count        = SUM(follow_bet_count)
+NS Donation Amount (incl. Tips)     = SUM(tip_amount_rm) + SUM(box_amount_rm) + SUM(wheel_amount_rm)   ← needs confirmation
+L1 Recommend Bet Count              = SUM(chatroom_recommend.RecommendCount)  on SabaMatchId × AnchorId
+L1 Follow Streamer Bet Turnover     = SUM(follow_member_to)
+L1 Follow User Count                = COUNT(DISTINCT cust_id) WHERE follow_bet_count > 0
+L1 Donation User Count              = COUNT(DISTINCT cust_id) WHERE if_tip = 1 (or if_tip|if_box|if_wheel)
+L1 Tip Amount                       = SUM(tip_amount_rm)
+L1 Tip Count                        = SUM(tip_count)
+L1 Tip User Count                   = COUNT(DISTINCT cust_id) WHERE if_tip = 1
+L1 Stream Count                     = COUNT(DISTINCT stream_id) at streamer × period grain
+L2 Follow Streamer (bet)            = SUM(follow_bet_count), SUM(follow_member_to)
+L2 Follow User/Player (bet)         = SUM(follow_player_bet_count), SUM(follow_player_member_to)
+L2 Follow System (bet)              = NOT IN core_streaming_performance — derive from fact_live_bet.follow_type
+L2 Self (bet)                       = total bet_count − follow_bet_count − follow_player_bet_count − follow_system_bet_count
+L2 Bet During Watch — Count         = SUM(during_watch_bet_count)
+L2 Bet During Watch — Turnover      = SUM(during_watch_member_to)
+L2 Watch Time total                 = SUM(watch_sec)
+L2 Watch Time per viewer            = SUM(watch_sec) / COUNT(DISTINCT cust_id WHERE if_watch = 1)
+Viewers                             = COUNT(DISTINCT cust_id WHERE if_watch = 1)
+```
+
+### Filters
+- `is_cancelled = FALSE` (exclude cancelled streams)
+- World Cup filter: `match_info.League` or `LeagueGroup` matching "FIFA World Cup" (exact value TBD — needs distinct-value probe)
+- For "Bet During Watch" we don't need to recompute the overlap — the `during_watch_*` columns and `is_during_watch` flag are pre-computed
+
+### Open data questions (small, can be resolved in one probe each)
+1. **Donation composition** — does "Donation" = tip only, or tip + box + wheel? Default: include all three.
+2. **Follow System category** — is it `fact_live_bet.follow_type = 'system'` or similar? Distinct-value probe needed.
+3. **World Cup filter value** — exact string in `match_info.League` / `LeagueGroup` for World Cup 2026.
+4. **Match stage** — needs manual mapping or derive from match date + bracket structure.
+5. **`is_lic` column** — meaning? (suspect "logged-in customer"). Filter or ignore?
+
+---
+
+## Skill File to Create (Phase 0 deliverable)
+
+Create `.claude/skills/bq-schemas/SKILL.md` in the repo so future Claude Code sessions auto-load this schema map.
+
+**Frontmatter:**
+```yaml
+---
+name: bq-schemas
+description: BigQuery table schemas for the livestream/streamer dashboard project. Use when querying nf-bifrost.livestream_dm, nf-bifrost.LiveStreaming, nf-muses.muses, or building dashboards/metrics on streaming, tips, bets, lucky boxes, lucky wheel, chatroom recommendations, or TFU features.
+---
+```
+
+**Body content:** the full text Clara pasted, organized by table, plus:
+- A "Common joins" section showing typical JOIN paths
+- A "Common filters" section (cancelled streams, World Cup, etc.)
+- The column-to-metric mapping above
+
+Path: `/home/user/Claude/.claude/skills/bq-schemas/SKILL.md`.
+
+---
+
+## SQL Files to Rewrite
+
+Replace `__RAW_*__` placeholders in all `sql/agg_*.sql` files with the real table names. Major shape change: **`core_streaming_performance` already does the per-cust × per-stream aggregation**, so:
+
+- `agg_session_metrics.sql` collapses to: `GROUP BY stream_id` on core_streaming_performance + JOIN chatroom_recommend + JOIN match_info — no need to recompute Bet During Watch or 4-category bets from raw bets (mostly).
+- `agg_match_platform_compare.sql` still needs `fact_live_bet` for Scope A (platform totals per match) and Scope B (platform totals per session time window).
+- `dim_match.sql` rebuilt against `match_info`, with manual `match_stage` mapping (TODO: lookup table for the 64 World Cup fixtures).
+- `dim_streamer.sql` rebuilt against `chatroom_anchor`, with `tier` derived from streamer history in `core_streaming_performance`.
+
+---
+
+## Phase 0 — BQ Discovery (now: small targeted probes only)
+
+Schemas are known; only 4 distinct-value probes needed:
+
+```sql
+-- 1. Confirm Donation composition columns present + ranges
+SELECT
+  COUNTIF(if_tip=1) AS sessions_with_tip,
+  COUNTIF(if_box=1) AS sessions_with_box,
+  COUNTIF(wheel_count>0) AS sessions_with_wheel,
+  SUM(tip_amount_rm) AS total_tip_rm,
+  SUM(box_amount_rm) AS total_box_rm,
+  SUM(wheel_amount_rm) AS total_wheel_rm
+FROM `nf-bifrost.livestream_dm.core_streaming_performance`
+WHERE stream_start_date BETWEEN '2026-05-01' AND '2026-05-22';
+
+-- 2. fact_live_bet.follow_type distinct values (to identify "Follow System")
+SELECT follow_type, COUNT(*) n FROM `nf-bifrost.livestream_dm.fact_live_bet`
+WHERE trans_dt >= '2026-05-01'
+GROUP BY follow_type ORDER BY n DESC;
+
+-- 3. match_info — find the World Cup string
+SELECT DISTINCT League, LeagueGroup, LeagueCnName, COUNT(*) n
+FROM `nf-bifrost.LiveStreaming.match_info`
+WHERE KickOffTime >= '2026-06-01'
+GROUP BY 1,2,3 ORDER BY n DESC LIMIT 50;
+
+-- 4. is_lic meaning — sample
+SELECT is_lic, COUNT(*) n
+FROM `nf-bifrost.livestream_dm.core_streaming_performance`
+WHERE stream_start_date >= '2026-05-01'
+GROUP BY 1;
+```
+
+After these 4 probes, all `__RAW_*__` placeholders can be filled and SQL is final.
 
 ---
 
@@ -228,5 +328,20 @@ Each `agg_*` table includes `as_of_date` so reruns are idempotent (insert-overwr
 
 ---
 
-## Recommended Next Action
-Kick off **Phase 0 BQ discovery**: write SQL probes (`INFORMATION_SCHEMA` queries + sample-row pulls) against the streaming dataset. Deliverable is a schema map + gap report we use to write the agg-table SQL. Needs from Clara: BQ project + dataset name(s).
+## Recommended Next Action (revised — schemas now known)
+
+Three concrete deliverables, ordered:
+
+1. **Commit `.claude/skills/bq-schemas/SKILL.md`** with the schema map Clara pasted, so future Claude Code sessions in this repo auto-load it. Include frontmatter `name: bq-schemas` + a description rich in trigger words (BigQuery, livestream, tips, bets, World Cup).
+2. **Rewrite the agg SQL** to use real table/column names:
+   - `agg_session_metrics.sql` — `GROUP BY stream_id` over `core_streaming_performance`, JOIN `chatroom_recommend` and `match_info`
+   - `agg_match_platform_compare.sql` — keep two CTEs (Scope A vs platform per match using `fact_live_bet`; Scope B vs platform during stream window)
+   - `dim_match.sql` — built from `match_info` filtered to World Cup; manual `match_stage` lookup for ~64 fixtures
+   - `dim_streamer.sql` — built from `chatroom_anchor`; tier derived from history in `core_streaming_performance`
+3. **Run the 4 discovery probes** (above) to confirm:
+   - Donation composition (tip + box + wheel?)
+   - `fact_live_bet.follow_type` distinct values
+   - World Cup filter string in `match_info.League` / `LeagueGroup`
+   - `is_lic` meaning
+
+After step 3, lock the SQL and schedule the daily 06:00 Taipei refresh.

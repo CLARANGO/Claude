@@ -1,7 +1,7 @@
 -- agg_streamer_monthly — streamer × calendar month
 -- Includes MoM % delta. 6-month trend is computed client-side from the row history.
 
-CREATE OR REPLACE TABLE `__PROJECT__.reporting.agg_streamer_monthly`
+CREATE OR REPLACE TABLE `nf-bifrost.reporting.agg_streamer_monthly`
 PARTITION BY month_start
 CLUSTER BY streamer_id
 AS
@@ -18,7 +18,7 @@ WITH monthly AS (
     SUM(tip_amount)                   AS tip_amount,
     SUM(watch_seconds_total)          AS watch_seconds_total,
     SUM(viewers)                      AS viewers
-  FROM `__PROJECT__.reporting.agg_session_metrics`
+  FROM `nf-bifrost.reporting.agg_session_metrics`
   GROUP BY streamer_id, month_start
 ),
 

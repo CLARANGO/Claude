@@ -1,55 +1,69 @@
 -- dim_match — World Cup 2026 fixtures with comparability tags
--- If an internal matches table exists, prefer that; else seed manually from FIFA fixture list.
+-- Source: nf-bifrost.LiveStreaming.match_info, filtered to World Cup.
 --
--- Tags:
---   match_stage           — 'group' | 'r16' | 'qf' | 'sf' | '3rd_place' | 'final'
---   team_popularity_tier  — 1 (top draws) / 2 / 3
---   time_slot_taipei      — 'prime' (20:00–24:00) | 'late_night' (00:00–06:00)
---                           'morning' (06:00–12:00) | 'afternoon' (12:00–20:00)
---   day_of_week           — 1..7 (Mon=1)
+-- match_stage and team_popularity_tier are NOT in match_info — added via lookup tables.
+-- The stage lookup is keyed by SabaMatchId (one row per fixture) and must be maintained
+-- manually as the bracket fills out. Tier is keyed by team name (CN).
+--
+-- TODO [Q3]: confirm the exact World Cup filter string.
 
-CREATE OR REPLACE TABLE `__PROJECT__.reporting.dim_match` AS
-WITH base AS (
-  -- Option A: pull from internal raw matches table if present
-  SELECT
-    match_id,
-    kickoff_ts,
-    team_home,
-    team_away,
-    stage AS match_stage
-  FROM `__RAW_MATCHES__`
-  -- Option B: replace the SELECT above with a literal VALUES list seeded from FIFA fixtures
-  --   SELECT * FROM UNNEST([STRUCT('M001' AS match_id, TIMESTAMP '2026-06-11 19:00:00 UTC' AS kickoff_ts,
-  --                                 'Mexico' AS team_home, 'Canada' AS team_away, 'group' AS match_stage), ...])
-),
+CREATE OR REPLACE TABLE `nf-bifrost.reporting.dim_match` AS
+WITH
+  base AS (
+    SELECT
+      SabaMatchId,
+      AnchorId,
+      KickOffTime,
+      League,
+      LeagueGroup,
+      HomeCnName,
+      AwayCnName,
+      Supplier,
+      IsSelfOwned
+    FROM `nf-bifrost.LiveStreaming.match_info`
+    WHERE isCancelled = FALSE
+      AND (LeagueGroup LIKE '%World Cup%' OR League LIKE '%World Cup%')
+  ),
 
-tier_map AS (
-  SELECT * FROM UNNEST([
-    -- Tier 1: historical top bet-volume nations
-    STRUCT('Brazil' AS team, 1 AS tier), ('Argentina', 1), ('England', 1), ('France', 1),
-    ('Germany', 1), ('Spain', 1), ('Portugal', 1), ('Netherlands', 1), ('Italy', 1),
-    -- Tier 2: strong but secondary draws
-    ('Belgium', 2), ('Croatia', 2), ('Uruguay', 2), ('Mexico', 2), ('USA', 2),
-    ('Japan', 2), ('Korea Republic', 2), ('Switzerland', 2), ('Denmark', 2),
-    ('Poland', 2), ('Senegal', 2), ('Morocco', 2), ('Australia', 2)
-    -- Everyone else defaults to tier 3
-  ])
-)
+  -- Team popularity tier (CN names — update from match_info distinct values after probe)
+  tier_map AS (
+    SELECT * FROM UNNEST([
+      STRUCT('巴西' AS team, 1 AS tier), ('阿根廷', 1), ('英格蘭', 1), ('法國', 1),
+      ('德國', 1), ('西班牙', 1), ('葡萄牙', 1), ('荷蘭', 1), ('意大利', 1),
+      ('比利時', 2), ('克羅地亞', 2), ('烏拉圭', 2), ('墨西哥', 2), ('美國', 2),
+      ('日本', 2), ('韓國', 2), ('瑞士', 2), ('丹麥', 2),
+      ('波蘭', 2), ('塞內加爾', 2), ('摩洛哥', 2), ('澳大利亞', 2)
+      -- everything else defaults to tier 3
+    ])
+  ),
+
+  -- Match stage lookup — fill in as fixtures finalize. Defaults to 'group' for early matches.
+  -- TODO: populate this lookup with the 64 World Cup fixtures.
+  stage_map AS (
+    SELECT * FROM UNNEST([
+      STRUCT(CAST(NULL AS STRING) AS SabaMatchId, CAST(NULL AS STRING) AS match_stage)
+    ])
+    WHERE SabaMatchId IS NOT NULL
+  )
 
 SELECT
-  b.match_id,
-  b.kickoff_ts,
-  b.team_home,
-  b.team_away,
-  b.match_stage,
+  b.SabaMatchId,
+  b.AnchorId,
+  b.KickOffTime,
+  b.League,
+  b.LeagueGroup,
+  b.HomeCnName,
+  b.AwayCnName,
+  COALESCE(sm.match_stage, 'group') AS match_stage,
   LEAST(COALESCE(th.tier, 3), COALESCE(ta.tier, 3)) AS team_popularity_tier,
   CASE
-    WHEN EXTRACT(HOUR FROM b.kickoff_ts AT TIME ZONE 'Asia/Taipei') BETWEEN 20 AND 23 THEN 'prime'
-    WHEN EXTRACT(HOUR FROM b.kickoff_ts AT TIME ZONE 'Asia/Taipei') BETWEEN 0  AND 5  THEN 'late_night'
-    WHEN EXTRACT(HOUR FROM b.kickoff_ts AT TIME ZONE 'Asia/Taipei') BETWEEN 6  AND 11 THEN 'morning'
+    WHEN EXTRACT(HOUR FROM b.KickOffTime AT TIME ZONE 'Asia/Taipei') BETWEEN 20 AND 23 THEN 'prime'
+    WHEN EXTRACT(HOUR FROM b.KickOffTime AT TIME ZONE 'Asia/Taipei') BETWEEN 0  AND 5  THEN 'late_night'
+    WHEN EXTRACT(HOUR FROM b.KickOffTime AT TIME ZONE 'Asia/Taipei') BETWEEN 6  AND 11 THEN 'morning'
     ELSE 'afternoon'
   END AS time_slot_taipei,
-  EXTRACT(DAYOFWEEK FROM DATE(b.kickoff_ts, 'Asia/Taipei')) AS day_of_week
+  EXTRACT(DAYOFWEEK FROM DATE(b.KickOffTime, 'Asia/Taipei')) AS day_of_week
 FROM base b
-LEFT JOIN tier_map th ON th.team = b.team_home
-LEFT JOIN tier_map ta ON ta.team = b.team_away;
+LEFT JOIN tier_map th ON th.team = b.HomeCnName
+LEFT JOIN tier_map ta ON ta.team = b.AwayCnName
+LEFT JOIN stage_map sm ON sm.SabaMatchId = b.SabaMatchId;

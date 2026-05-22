@@ -1,7 +1,7 @@
 -- agg_streamer_weekly — streamer × ISO week (Mon–Sun)
 -- Includes 4-week rolling median and WoW % delta.
 
-CREATE OR REPLACE TABLE `__PROJECT__.reporting.agg_streamer_weekly`
+CREATE OR REPLACE TABLE `nf-bifrost.reporting.agg_streamer_weekly`
 PARTITION BY iso_week_start
 CLUSTER BY streamer_id
 AS
@@ -18,7 +18,7 @@ WITH weekly AS (
     SUM(tip_amount)                   AS tip_amount,
     SUM(watch_seconds_total)          AS watch_seconds_total,
     SUM(viewers)                      AS viewers
-  FROM `__PROJECT__.reporting.agg_session_metrics`
+  FROM `nf-bifrost.reporting.agg_session_metrics`
   GROUP BY streamer_id, iso_week_start
 ),
 

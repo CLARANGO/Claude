@@ -30,9 +30,22 @@ apps_script/
 4. **Phase 3** — build Looker Studio dashboard (4 tabs: Session / Weekly+Monthly / Platform / Alert log).
 5. **Phase 4** — deploy `apps_script/alerts.gs` to the Sheet; configure Slack webhook + min-volume gate.
 
-## Required inputs from Clara
+## BQ project + datasets (resolved)
 
-- BQ project ID
-- BQ dataset name(s) holding raw streams / bets / watch / donations / recommendations
-- Slack webhook URL
-- World Cup fixtures source (if no internal `matches` table exists)
+- Source: `nf-bifrost` — `livestream_dm` + `LiveStreaming` + `VN_CTS_Data` (default region)
+- Reference: `nf-muses.muses` — TFU user-month features (region `asia-southeast1`)
+- Reporting output: `nf-bifrost.reporting.agg_*` tables
+
+See `.claude/skills/bq-schemas/SKILL.md` for the full schema map.
+
+## Open data questions (resolve via `sql/phase0_discovery.sql`)
+
+1. Donation composition — tip + box + wheel, or tip only?
+2. `fact_live_bet.follow_type` value for Follow System category
+3. Exact World Cup string in `match_info.League` / `LeagueGroup`
+4. `is_lic` meaning + `status_id` non-voided values
+5. `core_streaming_performance` ↔ `match_info` join key (currently anchor + time window)
+
+## Slack webhook
+
+Configured in Apps Script Script Properties: `SLACK_WEBHOOK_URL`. **Rotate the webhook** that was shared in chat before relying on it in production.

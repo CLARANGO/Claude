@@ -1,77 +1,90 @@
--- Phase 0 — BQ Discovery
--- Goal: enumerate raw tables, map them to required metrics, produce a gap report.
--- Replace __PROJECT__ and __DATASET__ before running. Run each block top-to-bottom.
+-- Phase 0 — BQ Discovery (targeted probes only — schemas are known)
+-- Project: nf-bifrost
+-- Run these 4 probes before locking the agg-table SQL.
 
 -- ============================================================
--- 1. List all tables in the dataset with row counts + date range
+-- 1. Donation composition: confirm tip + box + wheel are all populated
+--    and which ones we should sum into NS "Donation Amount"
 -- ============================================================
 SELECT
-  table_schema,
-  table_name,
-  row_count,
-  ROUND(size_bytes / POW(1024, 3), 2) AS size_gb,
-  TIMESTAMP_MILLIS(creation_time) AS created_at,
-  TIMESTAMP_MILLIS(last_modified_time) AS last_modified_at
-FROM `__PROJECT__.__DATASET__.__TABLES__`
-ORDER BY size_bytes DESC;
+  COUNT(*) AS rows_in_range,
+  COUNTIF(if_tip = 1)   AS sessions_with_tip,
+  COUNTIF(if_box = 1)   AS sessions_with_box,
+  COUNTIF(if_wheel = 1) AS sessions_with_wheel,
+  SUM(tip_amount_rm)    AS total_tip_rm,
+  SUM(box_amount_rm)    AS total_box_rm,
+  SUM(wheel_amount_rm)  AS total_wheel_rm
+FROM `nf-bifrost.livestream_dm.core_streaming_performance`
+WHERE stream_start_date BETWEEN '2026-05-01' AND CURRENT_DATE('Asia/Taipei');
 
 -- ============================================================
--- 2. Full schema dump for every table in the dataset
+-- 2. fact_live_bet.follow_type distinct values
+--    Identifies the string for "Follow System" category in agg_session_metrics.
 -- ============================================================
 SELECT
-  table_name,
-  ordinal_position,
-  column_name,
-  data_type,
-  is_nullable
-FROM `__PROJECT__.__DATASET__.INFORMATION_SCHEMA.COLUMNS`
-ORDER BY table_name, ordinal_position;
+  follow_type,
+  bet_type,
+  COUNT(*) AS n,
+  SUM(member_to) AS total_turnover
+FROM `nf-bifrost.livestream_dm.fact_live_bet`
+WHERE DATE(trans_dt, 'Asia/Taipei') >= DATE '2026-05-01'
+GROUP BY follow_type, bet_type
+ORDER BY n DESC
+LIMIT 50;
 
 -- ============================================================
--- 3. Per-candidate-table probes (uncomment & adjust table name per run)
+-- 3. World Cup filter — exact League / LeagueGroup string
 -- ============================================================
-
--- 3a. Row count + date range for a single table
--- SELECT
---   COUNT(*) AS n_rows,
---   MIN(<timestamp_col>) AS first_event,
---   MAX(<timestamp_col>) AS last_event
--- FROM `__PROJECT__.__DATASET__.<table_name>`;
-
--- 3b. Sample 5 rows (use TABLESAMPLE for big tables)
--- SELECT *
--- FROM `__PROJECT__.__DATASET__.<table_name>`
--- TABLESAMPLE SYSTEM (1 PERCENT)
--- LIMIT 5;
-
--- 3c. Distinct-value probe for category/enum columns
--- SELECT <col>, COUNT(*) n
--- FROM `__PROJECT__.__DATASET__.<table_name>`
--- GROUP BY <col>
--- ORDER BY n DESC
--- LIMIT 50;
+SELECT
+  League,
+  LeagueGroup,
+  LeagueCnName,
+  COUNT(*) AS n_matches,
+  MIN(KickOffTime) AS first_kick,
+  MAX(KickOffTime) AS last_kick
+FROM `nf-bifrost.LiveStreaming.match_info`
+WHERE KickOffTime >= '2026-06-01' AND KickOffTime < '2026-08-01'
+GROUP BY League, LeagueGroup, LeagueCnName
+ORDER BY n_matches DESC
+LIMIT 50;
 
 -- ============================================================
--- 4. Candidate tables to look for (rename as discovered)
+-- 4. is_lic meaning + status_id breakdown
 -- ============================================================
--- streams / sessions       → stream_id, streamer_id, match_id, start_ts, end_ts
--- bets                     → bet_id, user_id, stream_id, match_id, category, turnover, placed_ts, status
--- recommendations          → rec_id, streamer_id, stream_id, match_id, pick, shown_ts
--- watch_sessions           → user_id, stream_id, watch_start_ts, watch_end_ts
--- follows                  → follower_id, target_id, target_type, created_ts
--- donations                → donation_id, user_id, stream_id, amount, type ('donation'|'tip'), created_ts
--- users                    → user_id, is_bot_flag, multi_account_flag
--- matches                  → match_id, kickoff_ts, team_home, team_away, stage
+SELECT
+  is_lic,
+  COUNT(*) AS rows,
+  COUNT(DISTINCT cust_id) AS distinct_custs
+FROM `nf-bifrost.livestream_dm.core_streaming_performance`
+WHERE stream_start_date >= DATE '2026-05-01'
+GROUP BY is_lic;
+
+SELECT
+  status_id,
+  COUNT(*) AS n,
+  SUM(member_to) AS turnover
+FROM `nf-bifrost.livestream_dm.fact_live_bet`
+WHERE DATE(trans_dt, 'Asia/Taipei') >= DATE '2026-05-01'
+GROUP BY status_id
+ORDER BY n DESC;
 
 -- ============================================================
--- 5. Gap-report checklist (fill in after schema dump)
+-- 5. Sanity: csp ↔ match_info join coverage
+--    How many streams have a matching World Cup fixture via (anchor + kickoff in window)?
 -- ============================================================
--- [ ] Stream session boundaries available?
--- [ ] Bet category column distinguishes self / follow-user / follow-system / follow-streamer?
--- [ ] Recommend-bet link: can we join bet → streamer recommendation?
--- [ ] Watch sessions per user per stream (with start+end ts)?
--- [ ] Donation type field separates tip from non-tip donation?
--- [ ] Voided/cancelled bet status flag present?
--- [ ] Bot/multi-account flags on users?
--- [ ] World Cup fixture table exists OR needs manual build?
--- [ ] Platform-level bets accessible (all bets, not just stream-attributed)?
+WITH wc AS (
+  SELECT SabaMatchId, AnchorId, KickOffTime
+  FROM `nf-bifrost.LiveStreaming.match_info`
+  WHERE isCancelled = FALSE
+    AND (LeagueGroup LIKE '%World Cup%' OR League LIKE '%World Cup%')
+)
+SELECT
+  COUNT(DISTINCT csp.stream_id) AS world_cup_stream_count,
+  COUNT(DISTINCT IF(wc.SabaMatchId IS NULL, csp.stream_id, NULL)) AS streams_without_match
+FROM `nf-bifrost.livestream_dm.core_streaming_performance` csp
+LEFT JOIN wc
+  ON wc.AnchorId = csp.anchor_id
+ AND wc.KickOffTime BETWEEN TIMESTAMP_SUB(csp.stream_start_time, INTERVAL 1 HOUR)
+                       AND csp.stream_end_time
+WHERE csp.stream_start_date BETWEEN '2026-06-01' AND '2026-07-31'
+  AND csp.is_cancelled = FALSE;
