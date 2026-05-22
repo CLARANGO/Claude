@@ -12,7 +12,7 @@
 --   [Q3] World Cup filter string in match_info.League / LeagueGroup
 --   [Q5] csp ↔ match_info join key — currently anchor + time window
 
-CREATE OR REPLACE TABLE `nf-muses.muses.agg_session_metrics`
+CREATE OR REPLACE TABLE `nf-muses.worldcup.agg_session_metrics`
 PARTITION BY date
 CLUSTER BY streamer_id, stream_id
 AS
