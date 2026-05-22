@@ -49,8 +49,9 @@ function evaluateSessionAlerts_(ss) {
 
   // Group by streamer_id, sorted by session_date ASC
   const byStreamer = {};
-  rows.forEach(r => {
-    (byStreamer[r.streamer_id] ||= []).push(r);
+  rows.forEach(function(r) {
+    if (!byStreamer[r.streamer_id]) byStreamer[r.streamer_id] = [];
+    byStreamer[r.streamer_id].push(r);
   });
   Object.values(byStreamer).forEach(arr =>
     arr.sort((a, b) => new Date(a.session_date) - new Date(b.session_date))
