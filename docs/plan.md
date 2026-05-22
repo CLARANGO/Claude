@@ -15,21 +15,21 @@ Alerts: Slack webhook + in-sheet conditional formatting.
 
 ---
 
-## Metrics Tree (locked)
+## Metrics Tree (locked) — [ALERT] = monitored daily
 
 ```
 NORTH STAR
-├── Follow Streamer Bet Count     ← bets in the Follow-Streamer category
+├── Follow Streamer Bet Count     ← bets in the Follow-Streamer category    [ALERT]
 └── Donation Amount (incl. Tips)  ← Tips roll up into Donation total
 
 L1 — DRIVERS
 ├── Recommend Bet Count           ← streamer's recommend bet
-├── Follow Streamer Bet Turnover  ← $ on follow-streamer bets
+├── Follow Streamer Bet Turnover  ← $ on follow-streamer bets               [ALERT]
 ├── Follow User Count             ← unique users placing follow-streamer bets
 ├── Donation Amount (total)       ← includes tips
 ├── Donation User Count
-├── Tip Amount                    ← subset of Donation (broken out)
-├── Tip Count
+├── Tip Amount                    ← subset of Donation (broken out)         [ALERT]
+├── Tip Count                                                                [ALERT]
 ├── Tip User Count
 └── Stream Count                  ← # live sessions in period
 
@@ -40,10 +40,20 @@ L2 — DECOMPOSITION
 │   ├── Follow System
 │   └── Follow Streamer
 ├── Bet Turnover by category (same 4)
-├── Bet During Watch — Count      ← bet placed while user actively watching stream
-├── Bet During Watch — Turnover
+├── Bet During Watch — Count                                                 [ALERT]
+├── Bet During Watch — Turnover                                              [ALERT]
 └── Watch Time (total + avg per viewer)
 ```
+
+**The 6 [ALERT] KPIs are the alertable surface:**
+1. Follow Streamer Bet Count (NS)
+2. Follow Streamer Bet Turnover (L1)
+3. Tip Amount (L1)
+4. Tip Count (L1)
+5. Bet During Watch Count (L2)
+6. Bet During Watch Turnover (L2)
+
+Each is evaluated daily per stream session against rolling-5-median baseline + min-volume gate. Daily Slack digest summarizes overall performance so the dashboard doesn't need to be opened every morning.
 
 ### Locked definitions
 - **NS "Follow Streamer Bet Count"** = Follow Streamer category only (strictest definition of stream influence). Same metric appears at L2 as decomposition.
@@ -298,23 +308,89 @@ Each `agg_*` table includes `as_of_date` so reruns are idempotent (insert-overwr
 
 ---
 
-## Phase 4 — Alert Rules
+## Phase 4 — Alerts & Daily Slack Digest
 
-**Min-volume gate (always applied):** session must have ≥100 viewers AND ≥10 bets, else suppress alerts.
+Two complementary Slack surfaces so Clara never needs to open the dashboard:
 
-**Threshold alerts** (configurable per metric):
-- NS Follow Streamer Bet Count drops >30% vs rolling-5 median
-- Donation Amount drops >40% vs rolling-5 median
-- Watch Time drops >25% vs rolling-5 median
-- Weekly Stream Count drops >20% vs rolling-4-week median
-- Platform share drops >5 percentage points
+### 4a. Daily digest (always sent, 08:00 Taipei)
 
-**Anomaly alerts:** any L1 metric outside rolling-5 median ± 2 × MAD.
+```
+📊 World Cup Dashboard — <date>
+<N> streams · <N> streamers · <N> matches
+
+KPI snapshot (yesterday vs rolling-5 median):
+  Follow Streamer Bet Count       <total>   ▲/▼ <%>
+  Follow Streamer Bet Turnover    <total>   ▲/▼ <%>
+  Bet During Watch Count          <total>   ▲/▼ <%>
+  Bet During Watch Turnover       <total>   ▲/▼ <%>
+  Tip Amount (RM)                 <total>   ▲/▼ <%>
+  Tip Count                       <total>   ▲/▼ <%>
+
+🏆 Top 3 streamers (by Follow Streamer Bet Count)
+⚽ Top 3 matches
+
+⚠️ <N> alerts overnight — see thread
+```
+
+Implementation in `apps_script/alerts.gs` → `runDaily()`; scheduled at 08:00 Taipei (post-batch + 2h buffer).
+
+### 4b. Threshold + anomaly alerts (triggered)
+
+**Min-volume gate (always applied):** session must have ≥100 viewers AND ≥10 bets.
+
+**Per-session thresholds** — drop vs streamer's rolling-5 median:
+
+| KPI | Medium | High |
+|---|---|---|
+| Follow Streamer Bet Count | ≤ −30% | ≤ −50% |
+| Follow Streamer Bet Turnover | ≤ −30% | ≤ −50% |
+| Bet During Watch Count | ≤ −30% | ≤ −50% |
+| Bet During Watch Turnover | ≤ −30% | ≤ −50% |
+| Tip Amount | ≤ −40% | ≤ −60% |
+| Tip Count | ≤ −40% | ≤ −60% |
+
+**Weekly:** weekly stream count drops >20% vs rolling-4-week median.
+**Anomaly:** any of the 6 KPIs outside rolling-5 median ± 2 × MAD → medium.
+**Streamer absent:** streamer with ≥1 stream in last 3 days didn't stream yesterday → low.
 
 **Severity routing:**
-- High → Slack channel ping (@ops-team) + in-sheet red
-- Medium → Slack channel post (no @) + in-sheet yellow
-- All → Alert log row
+- High → Slack @-mention ping + in-sheet red
+- Medium → Slack thread under digest + in-sheet yellow
+- Low → digest only + in-sheet green
+- All → Alert Log row
+
+### 4c. Comparison-view definitions (used in Scope A/B share calculations)
+
+**"Our product" — strict definition (recommended default):** Bet During Watch only (`during_watch_member_to`). Most direct measure of stream-driven activity. Alternative: any bet from a user who watched any stream that day (any-touch). Lock one before reporting.
+
+**Platform side:** all non-voided bets from `fact_live_bet` (no stream filter). `status_id` filter TBD via Phase 0 probe.
+
+**Currency:** report in **RM** (matches `tip_amount_rm` + `member_to` columns). For cross-site totals convert via `fact_live_bet` exchange rate.
+
+**Scope A (per match)** — `our / platform` on the same `SabaMatchId`. Answers: "Did our streams capture more of this match?"
+
+**Scope B (per stream window)** — `our_during_watch / platform_in_window`. Answers: "Did our streamers move overall platform betting during their broadcast?"
+
+Both scopes roll up to streamer / week / month via `dim_streamer`.
+
+---
+
+## Easy-to-miss gotchas (worth checking before locking)
+
+1. **Per-viewer normalization.** A drop in raw Tip Amount can be (a) fewer viewers or (b) same viewers tipping less — different fixes. Track raw + per-viewer side-by-side.
+2. **Stream-length normalization.** 30-min vs 3-hour streams produce wildly different absolutes. Per-hour rates fix this.
+3. **Bet status filter.** `fact_live_bet.status_id` includes pending/voided — confirm settled values via probe before using `member_to`.
+4. **Currency mismatch.** `tip_amount_rm` (RM) vs `member_to` (site currency). Pick reporting currency once and convert.
+5. **Mean reversion.** After a hot streak, "back to normal" looks like a drop. Pair relative threshold with an absolute floor.
+6. **Tier-aware thresholds.** Rookies are noisier than top streamers. Consider looser thresholds (or skip anomaly alerts) for `dim_streamer.tier = 'rookie'`.
+7. **Match-tier mixing.** Brazil match vs minor-team match in a rolling median is apples-to-oranges. Include `team_popularity_tier` in alert context so reviewers can dismiss false positives.
+8. **Late-settling bets.** Bets settle after match ends. The 06:00 batch may miss recent settlements — schedule a 24h-rerun for the prior-prior day.
+9. **Slack noise budget.** 50 streamers × 6 KPIs = many candidates. Cap via digest model + tier filter + dedup (one streamer × metric × day max).
+10. **Streamer absence.** If a streamer skips a day, the rolling-5 doesn't shift — they look "fine" with zero data. The `absent` alert (≥1 stream in last 3d + 0 yesterday) catches this.
+11. **Min-volume gate edge.** 99 viewers = suppressed. Start at 100 viewers + 10 bets; tune after week 1.
+12. **World Cup format change.** Group stage = 4 matches/day; knockout = 1–2/day. WoW comparison across the boundary is misleading — flag the transition date in the digest.
+13. **Digest delivery timing.** 08:00 Taipei = 06:00 batch + 2h buffer. If batches sometimes run late, gate the digest on a "data complete" sentinel cell.
+14. **Holiday calendars.** Local holidays change viewing patterns. Add a `holidays` lookup or annotate the digest.
 
 ---
 
