@@ -1,3 +1,4 @@
+-- Region: asia-southeast1 (Singapore). Run with --location=asia-southeast1.
 -- agg_match_platform_compare — match-level (Scope A) + time-window aggregate (Scope B)
 --
 -- Scope A: per SabaMatchId, our (during-watch) bet volume vs platform total on that match

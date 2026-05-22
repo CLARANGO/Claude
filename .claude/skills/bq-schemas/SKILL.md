@@ -7,9 +7,11 @@ description: BigQuery table schemas for the livestream/streamer dashboard projec
 
 This skill is a reference for the BQ tables backing the streamer performance dashboard. When the user asks about streamers, tips, bets, donations, or the World Cup dashboard, consult this file before writing SQL.
 
-**Projects:**
-- `nf-bifrost` — livestream + chatroom + bet data (default region)
-- `nf-muses` — TFU feature tables (region `asia-southeast1`)
+**Projects + region:**
+- `nf-bifrost` — livestream + chatroom + bet data — **region `asia-southeast1` (Singapore)**
+- `nf-muses` — TFU feature tables — **region `asia-southeast1` (Singapore)**
+
+**All BigQuery work — datasets, scheduled queries, materialized tables — must be in `asia-southeast1`.** Cross-region joins are not allowed; the `reporting` dataset that holds our agg tables must be created in the same region.
 
 **Default filters:**
 - `is_cancelled = FALSE` on streams

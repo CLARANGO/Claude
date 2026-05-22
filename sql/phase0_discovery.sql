@@ -1,3 +1,4 @@
+-- Region: asia-southeast1 (Singapore). Run with --location=asia-southeast1.
 -- Phase 0 — BQ Discovery (targeted probes only — schemas are known)
 -- Project: nf-bifrost
 -- Run these 4 probes before locking the agg-table SQL.

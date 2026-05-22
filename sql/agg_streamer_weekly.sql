@@ -1,3 +1,4 @@
+-- Region: asia-southeast1 (Singapore). Run with --location=asia-southeast1.
 -- agg_streamer_weekly — streamer × ISO week (Mon–Sun)
 -- Includes 4-week rolling median and WoW % delta.
 

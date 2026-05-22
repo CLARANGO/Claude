@@ -114,7 +114,7 @@ Definitions:
 
 ## BQ Schema Map (resolved from claude.ai skill)
 
-**Project:** `nf-bifrost` (chatroom/livestream data) + `nf-muses` (TFU features, region `asia-southeast1`).
+**Project + region:** `nf-bifrost` (chatroom/livestream data) + `nf-muses` (TFU features). **All datasets live in `asia-southeast1` (Singapore).** The reporting dataset that holds `agg_*` tables must be created in the same region, and all scheduled queries must run with `--location=asia-southeast1`. Cross-region joins are not allowed.
 
 ### Primary fact tables
 

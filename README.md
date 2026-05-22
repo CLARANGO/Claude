@@ -32,9 +32,17 @@ apps_script/
 
 ## BQ project + datasets (resolved)
 
-- Source: `nf-bifrost` — `livestream_dm` + `LiveStreaming` + `VN_CTS_Data` (default region)
-- Reference: `nf-muses.muses` — TFU user-month features (region `asia-southeast1`)
+**Region: `asia-southeast1` (Singapore) — for everything.**
+
+- Source: `nf-bifrost` — `livestream_dm` + `LiveStreaming` + `VN_CTS_Data`
+- Reference: `nf-muses.muses` — TFU user-month features
 - Reporting output: `nf-bifrost.reporting.agg_*` tables
+
+Before running any agg SQL: create the `reporting` dataset in `asia-southeast1`:
+```bash
+bq --location=asia-southeast1 mk --dataset nf-bifrost:reporting
+```
+Scheduled queries that build agg tables must also be created with `--location=asia-southeast1`.
 
 See `.claude/skills/bq-schemas/SKILL.md` for the full schema map.
 

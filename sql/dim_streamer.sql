@@ -1,3 +1,4 @@
+-- Region: asia-southeast1 (Singapore). Run with --location=asia-southeast1.
 -- dim_streamer — streamer attributes for filtering / cohort comparison
 -- Source: nf-bifrost.LiveStreaming.chatroom_anchor + history from core_streaming_performance.
 --

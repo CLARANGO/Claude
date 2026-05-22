@@ -1,3 +1,4 @@
+-- Region: asia-southeast1 (Singapore). Run with --location=asia-southeast1.
 -- dim_match — World Cup 2026 fixtures with comparability tags
 -- Source: nf-bifrost.LiveStreaming.match_info, filtered to World Cup.
 --

@@ -1,3 +1,4 @@
+-- Region: asia-southeast1 (Singapore). Run with --location=asia-southeast1.
 -- agg_session_metrics — one row per stream session
 -- Source: nf-bifrost.livestream_dm.core_streaming_performance (cust_id × stream_id grain)
 -- SUM over cust_id to collapse to one row per stream_id.

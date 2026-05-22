@@ -1,3 +1,4 @@
+-- Region: asia-southeast1 (Singapore). Run with --location=asia-southeast1.
 -- agg_streamer_monthly — streamer × calendar month
 -- Includes MoM % delta. 6-month trend is computed client-side from the row history.
 
