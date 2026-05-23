@@ -210,7 +210,48 @@ top_gift_streamer AS (
   ) = 1
 ),
 
--- 8. Account creation date for age tier --------------------------------
+-- 8. League turnover (lifetime, joined to match_info for league names) -
+league_to_lifetime AS (
+  SELECT
+    flb.cust_id,
+    COALESCE(mi.League, 'Unmapped Match')              AS league,
+    SUM(flb.member_to)                                 AS league_to
+  FROM `nf-bifrost.livestream_dm.fact_live_bet` flb
+  LEFT JOIN (
+    SELECT SabaMatchId, League
+    FROM `nf-bifrost.LiveStreaming.match_info`
+    WHERE League IS NOT NULL
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY SabaMatchId ORDER BY KickOffTime) = 1
+  ) mi ON flb.match_id = mi.SabaMatchId
+  CROSS JOIN date_bounds db
+  WHERE flb.site_id != 99
+    AND DATE(flb.trans_dt) >= db.start_month
+    AND DATE(flb.trans_dt) <  DATE_ADD(db.end_month, INTERVAL 1 MONTH)
+  GROUP BY flb.cust_id, league
+),
+
+-- 9. Lifetime % share per league + dominance flag ---------------------
+league_pct_lifetime AS (
+  SELECT
+    cust_id,
+    league,
+    league_to,
+    SUM(league_to) OVER (PARTITION BY cust_id)                       AS total_league_to,
+    SAFE_DIVIDE(league_to, SUM(league_to) OVER (PARTITION BY cust_id)) AS pct
+  FROM league_to_lifetime
+),
+
+-- 10. Per-user league segment summary --------------------------------
+league_segment_lifetime AS (
+  SELECT
+    cust_id,
+    COUNTIF(pct >= 0.25 AND league != 'Unmapped Match')                          AS dominant_count,
+    MAX(CASE WHEN pct >= 0.25 AND league != 'Unmapped Match' THEN league END)    AS dominant_league
+  FROM league_pct_lifetime
+  GROUP BY cust_id
+),
+
+-- 11. Account creation date for age tier -------------------------------
 customer_age AS (
   SELECT
     CustID AS cust_id,
@@ -316,6 +357,10 @@ SELECT
     ELSE 'Mixed'
   END                                                      AS day_segment,
 
+  -- League segment (lifetime: leagues with >=25% share of total turnover)
+  ls.dominant_count,
+  ls.dominant_league,
+
   -- Breadth score 0–5: distinct activities user EVER did over the window
   ( CASE WHEN uls.total_tip_count   > 0 THEN 1 ELSE 0 END
   + CASE WHEN uls.total_messages    > 0 THEN 1 ELSE 0 END
@@ -354,6 +399,7 @@ LEFT JOIN bet_timing_lifetime bt  ON uls.cust_id = bt.cust_id
 LEFT JOIN customer_age        ca  ON uls.cust_id = ca.cust_id
 LEFT JOIN top_follow_streamer tfs ON uls.cust_id = tfs.cust_id
 LEFT JOIN top_gift_streamer   tgs ON uls.cust_id = tgs.cust_id
+LEFT JOIN league_segment_lifetime ls ON uls.cust_id = ls.cust_id
 
 -- Active-user filter: lifetime activity (any bet OR any gift)
 WHERE uls.total_bet_count >= 1
