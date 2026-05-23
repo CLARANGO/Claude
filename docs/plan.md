@@ -9,7 +9,7 @@ Clara (data analysis) needs a dashboard tracking streamer performance during the
 
 Source: existing BigQuery tables (schemas resolved — see "BQ Schema Map" below).
 Output: BQ materialized agg tables → Google Sheets → Looker Studio.
-Refresh: daily batch, 06:00 Taipei (UTC+8).
+Refresh: daily batch, 13:00 Taipei (UTC+8).
 Audience: ops team + management (view-only).
 Alerts: Slack webhook + in-sheet conditional formatting.
 
@@ -19,39 +19,38 @@ Alerts: Slack webhook + in-sheet conditional formatting.
 
 ```
 NORTH STAR
-├── Follow Streamer Bet Count     ← bets in the Follow-Streamer category    [ALERT]
-└── Donation Amount (incl. Tips)  ← Tips roll up into Donation total
+├── Follow Streamer Bet Count     ← bets in the Follow-Streamer category     [ALERT]
+├── Bet During Watch — Turnover   ← RM                                       [ALERT]
+└── Donation Amount (incl. Tips)  ← USD,Tips roll up into Donation total     [ALERT]
+
 
 L1 — DRIVERS
 ├── Recommend Bet Count           ← streamer's recommend bet
-├── Follow Streamer Bet Turnover  ← $ on follow-streamer bets               [ALERT]
+├── Follow Streamer Bet Turnover  ← RM on follow-streamer bets               [ALERT]
 ├── Follow User Count             ← unique users placing follow-streamer bets
-├── Donation Amount (total)       ← includes tips
-├── Donation User Count
-├── Tip Amount                    ← subset of Donation (broken out)         [ALERT]
-├── Tip Count                                                                [ALERT]
-├── Tip User Count
-└── Stream Count                  ← # live sessions in period
+├── Donation User Count                                                      [ALERT]
+├── Donation Count
+├── Tip Amount                    ← USD, subset of Donation (broken out)       
+├── Tip Count                     
+├── Wheel Amount                  ← USD, subset of Donation (broken out)         
+├── Wheel Count                                                               
+├── Box Amount                    ← USD, subset of Donation (broken out)         
+├── Box Count                                                                
+└── Stream Count                  ← # live sessions in period, streamer+stream id = 1 count
 
 L2 — DECOMPOSITION
-├── Bet Count by category
-│   ├── Self
-│   ├── Follow User
-│   ├── Follow System
-│   └── Follow Streamer
 ├── Bet Turnover by category (same 4)
 ├── Bet During Watch — Count                                                 [ALERT]
-├── Bet During Watch — Turnover                                              [ALERT]
-└── Watch Time (total + avg per viewer)
+└── Watch Time (total + avg per viewer + PCU)
 ```
 
 **The 6 [ALERT] KPIs are the alertable surface:**
 1. Follow Streamer Bet Count (NS)
 2. Follow Streamer Bet Turnover (L1)
-3. Tip Amount (L1)
+3. Tip Amount (NS)
 4. Tip Count (L1)
 5. Bet During Watch Count (L2)
-6. Bet During Watch Turnover (L2)
+6. Bet During Watch Turnover (NS)
 
 Each is evaluated daily per stream session against rolling-5-median baseline + min-volume gate. Daily Slack digest summarizes overall performance so the dashboard doesn't need to be opened every morning.
 
@@ -66,11 +65,15 @@ Each is evaluated daily per stream session against rolling-5-median baseline + m
 
 ## World Cup Context & Match Tagging
 
-June–July is a single tournament — comparability is easier, but variance comes from team popularity and stage. Tag matches in `dim_match`:
+June 12–July 20 is worldcup tournament — comparability is easier, but variance comes from team popularity and stage. 
 
-- `match_stage` — group / R16 / QF / SF / final
-- `team_popularity_tier` — tier 1 (Brazil, Argentina, England, France, Germany, Spain…) / tier 2 / tier 3 (by FIFA ranking or platform historical bet volume)
-- `time_slot_taipei` — prime (20:00–24:00) / late-night / morning / afternoon (derived from kickoff)
+Original dim table : nf-bifrost.LiveStreaming.match_info 
+Schemas: Month \	kickoffday\	timehour \	KickOffTime	\ Item \	League	\Team	\country	\Streamer	\SabaMatchId	\AnchorId	\Shared	\InfoSiteMatchId	\CloseTime	\LeagueId	\LeagueGroup	\LeagueCnName	\HomeCnName	\AwayCnName\	Supplier	\IsSelfOwned	\isCancelled
+
+->Tag matches in `dim_match`:
+
+- `match_stage` — group(6/11-6/28) / R32(6/29-7/4) / R16(7/5-7/8) / QF(7/1-7/12) / SF(7/15-7/16) / Third place play-off (7/19) / final(7/20)
+- `time_slot_taipei` — late-night / morning / afternoon (derived from kickoff)
 - `day_of_week`
 
 ---
@@ -79,35 +82,37 @@ June–July is a single tournament — comparability is easier, but variance com
 
 ### 1. Match-by-match (per session)
 - Each row = one live session (stream_id, streamer_id, match_id)
-- Compare current vs **rolling median of streamer's last 5 matches**
+- Compare current vs **rolling median of the last 3 matches** when match_stage = group
+  + Compare current vs **rolling median of the last 3 matches** when match_stage = R32, R16
+  + Compare current vs **rolling median of the last match ** when match_stage = QF, SF, Third place play-off, final
+  + final compare to avg AVG all matches in the season
 - Display: current, rolling median, delta %, sparkline
 - **Sample-size guard:** <3 prior matches → show "n/a"
 
 ### 2. Week (ISO Mon–Sun)
-- Current week vs rolling-4-week median
+- Current week vs rolling acummulated week avg ( week 2 vs week 1, week 3 vs avg week1+2, ...)
 - WoW % change
 - Top 5 streamers + top 5 matches by NS
 
 ### 3. Month
-- MTD vs prior month
-- 6-month trend
-- Top streamer + top match of the month
+- June vs July
+- Top streamer + top match of the whole season
 
 ### 4. Our Product vs Platform (two scopes)
 
 **Scope A — Match-level (per match our streamers covered):**
-- Our bet turnover / Platform bet turnover on that match = **match share of wallet**
+- Our bet turnover / Platform bet turnover on that match = **match share**
 - Our bet count / Platform bet count = **match share of bets**
 - Our avg bet size vs platform avg bet size
 - Rolls up by streamer / week / month
 
-**Scope B — Time-window aggregate (per session window):**
-- Our bet turnover during stream window / Platform total bet turnover during same window = **time-window share**
+**Scope B — Season-window aggregate (per session window):**
+- Our bet turnover during the season / Platform total bet turnover during season 
 - Tests whether our streams move overall platform activity, not just the covered match
 
 Definitions:
 - Our product bet = Bet During Watch (watch + bet timestamps overlap)
-- Platform bet = all bets on platform (Scope A: same match; Scope B: same time window)
+- Platform bet = all bets on platform (Scope A: same match, with sites having streamer function; Scope B: whole season)
 - Both sides: exclude voided
 
 ---
