@@ -1,0 +1,361 @@
+-- =====================================================================
+-- TFU Prediction — Lifetime user feature table (one row per cust_id)
+-- Grain: cust_id  |  Chatroom only (site_id != 99)
+-- Window: last 6 completed months (same as tfu_user_monthly)
+-- Active filter: lifetime bet_count >= 1 OR any gift (tip/box/wheel) > 0
+--
+-- Pattern A — lifetime re-derivation. Bucket CASEs apply the same logic
+-- as build_tfu_user_monthly.sql, but on SUMs across the 6-month window.
+-- Pattern B — ever-in-state for is_tfu / is_donated / is_follow_bet:
+--   uses a monthly intermediate so "ever-TFU" requires gift AND follow_bet
+--   in the SAME month, not just lifetime presence of each.
+-- Pattern C — account_age_tier is computed at the latest month_end.
+-- =====================================================================
+CREATE OR REPLACE TABLE `nf-muses.muses.tfu_user_lifetime` AS
+
+WITH
+-- 1. Date window: last 6 completed calendar months ----------------------
+date_bounds AS (
+  SELECT
+    DATE_TRUNC(DATE_SUB(CURRENT_DATE('Asia/Taipei'), INTERVAL 6 MONTH), MONTH) AS start_month,
+    DATE_TRUNC(DATE_SUB(CURRENT_DATE('Asia/Taipei'), INTERVAL 1 MONTH), MONTH) AS end_month,
+    LAST_DAY(
+      DATE_TRUNC(DATE_SUB(CURRENT_DATE('Asia/Taipei'), INTERVAL 1 MONTH), MONTH),
+      MONTH
+    )                                                                       AS window_end_date
+),
+
+-- 2. Session-level chatroom data (identical filters to monthly build) --
+sessions AS (
+  SELECT
+    csp.cust_id,
+    DATE_TRUNC(csp.stream_start_date, MONTH)               AS month_start,
+    csp.stream_id,
+    csp.anchor_id,
+    csp.streamer,
+    csp.site,
+    csp.currency,
+    csp.device,
+    CASE WHEN csp.stream_type LIKE 'Sport%' THEN 'sports'
+         ELSE 'entertainment' END                          AS stream_type_norm,
+    csp.watch_sec,
+    csp.chatroom_sec,
+    csp.bullet_sec,
+    csp.message_count,
+    csp.tip_count,        csp.tip_amount_rm,
+    csp.box_count,        csp.box_amount_rm,
+    csp.wheel_count,      csp.wheel_amount_rm,
+    csp.bet_count,        csp.member_to,
+    csp.during_watch_bet_count,
+    csp.follow_bet_count,
+    csp.if_chat, csp.if_bullet, csp.if_tip, csp.if_bet
+  FROM `nf-bifrost.livestream_dm.core_streaming_performance` csp
+  CROSS JOIN date_bounds db
+  WHERE csp.is_lic = 1
+    AND csp.is_shared IS TRUE
+    AND csp.is_cancelled IS FALSE
+    AND csp.site_id != 99
+    AND csp.streamer NOT IN ('Popo','GOKU','ID_0')
+    AND csp.streamer != 'ID_N/A'
+    AND csp.streamer NOT LIKE 'ID_%'
+    AND csp.stream_start_date >= db.start_month
+    AND csp.stream_start_date <  DATE_ADD(db.end_month, INTERVAL 1 MONTH)
+),
+
+-- 3a. Monthly aggregates — needed for ever-TFU (same-month coincidence) -
+user_month_agg AS (
+  SELECT
+    cust_id,
+    month_start,
+    SUM(tip_count + box_count + wheel_count) AS gift_count_month,
+    SUM(follow_bet_count)                    AS follow_bet_count_month
+  FROM sessions
+  GROUP BY cust_id, month_start
+),
+
+ever_flags AS (
+  SELECT
+    cust_id,
+    MAX(CASE WHEN gift_count_month > 0 AND follow_bet_count_month > 0
+             THEN 1 ELSE 0 END)                            AS is_tfu_ever,
+    MAX(CASE WHEN gift_count_month > 0 THEN 1 ELSE 0 END)  AS is_gifter_ever,
+    MAX(CASE WHEN follow_bet_count_month > 0
+             THEN 1 ELSE 0 END)                            AS is_follow_bet_ever,
+    COUNT(*)                                               AS months_observed
+  FROM user_month_agg
+  GROUP BY cust_id
+),
+
+-- 3b. Lifetime session metrics per cust_id (no month grouping) ---------
+user_lifetime_session AS (
+  SELECT
+    cust_id,
+    ANY_VALUE(site)                                        AS site,
+    ANY_VALUE(currency)                                    AS currency,
+
+    -- Loyalty
+    COUNT(DISTINCT CASE WHEN anchor_id != 0
+      THEN CONCAT(CAST(anchor_id AS STRING),'-',CAST(stream_id AS STRING))
+    END)                                                   AS sessions_count,
+    COUNT(DISTINCT streamer)                               AS distinct_streamers,
+
+    -- Watch
+    SUM(watch_sec)                                         AS total_watch_sec,
+    SAFE_DIVIDE(
+      SUM(watch_sec),
+      COUNT(DISTINCT CASE WHEN anchor_id != 0
+        THEN CONCAT(CAST(anchor_id AS STRING),'-',CAST(stream_id AS STRING))
+      END)
+    )                                                      AS avg_watch_sec_per_session,
+
+    -- Chat
+    SUM(message_count)                                     AS total_messages,
+    SUM(CASE WHEN if_chat THEN 1 ELSE 0 END)               AS chat_sessions,
+    SUM(bullet_sec)                                        AS total_bullet_sec,
+    SUM(chatroom_sec)                                      AS total_chatroom_sec,
+
+    -- Gifting (RM → USD / 4.2)
+    SUM(tip_count)                                         AS total_tip_count,
+    SUM(tip_amount_rm)   / 4.2                             AS total_tip_usd,
+    SUM(box_count)                                         AS total_box_count,
+    SUM(box_amount_rm)   / 4.2                             AS total_box_usd,
+    SUM(wheel_count)                                       AS total_wheel_count,
+    SUM(wheel_amount_rm) / 4.2                             AS total_wheel_usd,
+
+    -- Betting
+    SUM(bet_count)                                         AS total_bet_count,
+    SUM(member_to)                                         AS total_member_to,
+    SUM(during_watch_bet_count)                            AS total_bdw_bet_count,
+    SUM(follow_bet_count)                                  AS total_follow_bet_count,
+
+    -- Stream type session split (for preference re-derivation)
+    SUM(CASE WHEN stream_type_norm='sports'        THEN 1 ELSE 0 END) AS sports_sessions,
+    SUM(CASE WHEN stream_type_norm='entertainment' THEN 1 ELSE 0 END) AS ent_sessions,
+
+    -- Device session split (for preference re-derivation)
+    SUM(CASE WHEN LOWER(device) LIKE '%mobile%'
+              OR LOWER(device) LIKE '%android%'
+              OR LOWER(device) LIKE '%ios%'
+              OR LOWER(device) LIKE '%iphone%'   THEN 1 ELSE 0 END) AS mobile_sessions,
+    SUM(CASE WHEN LOWER(device) LIKE '%desktop%'
+              OR LOWER(device) LIKE '%pc%'
+              OR LOWER(device) LIKE '%web%'      THEN 1 ELSE 0 END) AS desktop_sessions
+  FROM sessions
+  GROUP BY cust_id
+),
+
+-- 4. Lifetime bet timing (day/night, weekday/weekend) ------------------
+bet_timing_lifetime AS (
+  SELECT
+    flb.cust_id,
+    SUM(CASE WHEN EXTRACT(HOUR FROM flb.trans_dt) BETWEEN 6 AND 17
+             THEN 1 ELSE 0 END)                            AS day_bet_count,
+    SUM(CASE WHEN EXTRACT(HOUR FROM flb.trans_dt) BETWEEN 6 AND 17
+             THEN 0 ELSE 1 END)                            AS night_bet_count,
+    COUNT(*)                                               AS total_bets,
+    SUM(CASE WHEN EXTRACT(DAYOFWEEK FROM flb.trans_dt) BETWEEN 2 AND 6
+             THEN flb.member_to ELSE 0 END)                AS weekday_to,
+    SUM(CASE WHEN EXTRACT(DAYOFWEEK FROM flb.trans_dt) IN (1,7)
+             THEN flb.member_to ELSE 0 END)                AS weekend_to,
+    SUM(flb.member_to)                                     AS total_to
+  FROM `nf-bifrost.livestream_dm.fact_live_bet` flb
+  CROSS JOIN date_bounds db
+  WHERE flb.site_id != 99
+    AND DATE(flb.trans_dt) >= db.start_month
+    AND DATE(flb.trans_dt) <  DATE_ADD(db.end_month, INTERVAL 1 MONTH)
+  GROUP BY flb.cust_id
+),
+
+-- 5. User × streamer aggregation (lifetime, for top-streamer features) -
+user_streamer_lifetime AS (
+  SELECT
+    cust_id,
+    streamer,
+    anchor_id,
+    SUM(follow_bet_count)                                          AS streamer_follow_bet_count,
+    SUM(tip_count + box_count + wheel_count)                       AS streamer_gift_count,
+    SUM(tip_amount_rm + box_amount_rm + wheel_amount_rm) / 4.2     AS streamer_gift_usd
+  FROM sessions
+  GROUP BY cust_id, streamer, anchor_id
+),
+
+-- 6. Top streamer by lifetime follow-bet ------------------------------
+top_follow_streamer AS (
+  SELECT
+    cust_id,
+    streamer                       AS top_follow_streamer,
+    anchor_id                      AS top_follow_anchor_id,
+    streamer_follow_bet_count      AS top_follow_streamer_bet_count
+  FROM user_streamer_lifetime
+  WHERE streamer_follow_bet_count > 0
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY cust_id
+    ORDER BY streamer_follow_bet_count DESC, streamer
+  ) = 1
+),
+
+-- 7. Top streamer by lifetime gifting (USD) ----------------------------
+top_gift_streamer AS (
+  SELECT
+    cust_id,
+    streamer                       AS top_gift_streamer,
+    anchor_id                      AS top_gift_anchor_id,
+    streamer_gift_count            AS top_gift_streamer_count,
+    streamer_gift_usd              AS top_gift_streamer_usd
+  FROM user_streamer_lifetime
+  WHERE streamer_gift_count > 0
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY cust_id
+    ORDER BY streamer_gift_usd DESC, streamer
+  ) = 1
+),
+
+-- 8. Account creation date for age tier --------------------------------
+customer_age AS (
+  SELECT
+    CustID AS cust_id,
+    DATE(
+      DATETIME(
+        TIMESTAMP(CreatedDate, 'UTC-4'),
+        'Asia/Taipei'
+      )
+    ) AS created_date
+  FROM `nf-bifrost.VN_CTS_Data.CTSCustomer`
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY CustID ORDER BY ModifiedTime DESC) = 1
+)
+
+-- =======================================================================
+-- Final assembly: lifetime features + ever-in-state targets
+-- =======================================================================
+SELECT
+  uls.cust_id,
+  ef.months_observed,
+  db.start_month                                           AS window_start,
+  db.end_month                                             AS window_end,
+  db.window_end_date,
+
+  -- Account age (computed at the window's latest month_end)
+  DATE_DIFF(db.window_end_date, ca.created_date, DAY)      AS account_age_days,
+  CASE
+    WHEN ca.created_date IS NULL                                            THEN 'Unknown'
+    WHEN DATE_DIFF(db.window_end_date, ca.created_date, MONTH) < 1  THEN 'Newborn'
+    WHEN DATE_DIFF(db.window_end_date, ca.created_date, MONTH) < 3  THEN 'Rising'
+    WHEN DATE_DIFF(db.window_end_date, ca.created_date, MONTH) < 6  THEN 'Established'
+    WHEN DATE_DIFF(db.window_end_date, ca.created_date, MONTH) < 12 THEN 'Veteran'
+    WHEN DATE_DIFF(db.window_end_date, ca.created_date, MONTH) < 36 THEN 'Pioneer'
+    ELSE 'Legend'
+  END                                                      AS account_age_tier,
+
+  -- Site / currency
+  uls.site,
+  uls.currency,
+
+  -- Loyalty (lifetime)
+  uls.sessions_count,
+  uls.distinct_streamers,
+  CASE
+    WHEN uls.sessions_count BETWEEN 1 AND 2  THEN '1-2'
+    WHEN uls.sessions_count BETWEEN 3 AND 9  THEN '3-9'
+    ELSE '10+'
+  END                                                      AS sessions_bucket,
+
+  -- Watch (lifetime)
+  uls.total_watch_sec,
+  uls.avg_watch_sec_per_session,
+  CASE
+    WHEN uls.avg_watch_sec_per_session <  900 THEN '<15min'
+    WHEN uls.avg_watch_sec_per_session < 1800 THEN '15-30min'
+    WHEN uls.avg_watch_sec_per_session < 2700 THEN '30-45min'
+    ELSE '>45min'
+  END                                                      AS watch_bucket,
+
+  -- Chat (lifetime)
+  uls.total_messages,
+  uls.chat_sessions,
+  uls.total_bullet_sec,
+  uls.total_chatroom_sec,
+
+  -- Gifting (lifetime)
+  uls.total_tip_count,   uls.total_tip_usd,
+  uls.total_box_count,   uls.total_box_usd,
+  uls.total_wheel_count, uls.total_wheel_usd,
+
+  -- Betting (lifetime)
+  uls.total_bet_count,
+  uls.total_member_to,
+  uls.total_bdw_bet_count,
+  uls.total_follow_bet_count,
+
+  -- Stream type preference (re-derived from lifetime session split)
+  CASE
+    WHEN uls.sports_sessions > uls.ent_sessions    THEN 'sports'
+    WHEN uls.ent_sessions    > uls.sports_sessions THEN 'entertainment'
+    ELSE 'mixed'
+  END                                                      AS stream_type_pref,
+
+  -- Device preference (re-derived from lifetime session split)
+  CASE
+    WHEN uls.mobile_sessions  > uls.desktop_sessions THEN 'mobile'
+    WHEN uls.desktop_sessions > uls.mobile_sessions  THEN 'desktop'
+    ELSE 'mixed'
+  END                                                      AS device_pref,
+
+  -- Time segment (lifetime, bet-count weighted)
+  CASE
+    WHEN COALESCE(bt.total_bets, 0) = 0                          THEN 'no_bets'
+    WHEN SAFE_DIVIDE(bt.day_bet_count,   bt.total_bets) >= 0.75  THEN 'Day'
+    WHEN SAFE_DIVIDE(bt.night_bet_count, bt.total_bets) >= 0.75  THEN 'Night'
+    ELSE 'Mixed'
+  END                                                      AS time_segment,
+
+  -- Day segment (lifetime, turnover weighted)
+  CASE
+    WHEN COALESCE(bt.total_to, 0) = 0                            THEN 'no_bets'
+    WHEN SAFE_DIVIDE(bt.weekday_to, bt.total_to) >= 0.75         THEN 'Weekday'
+    WHEN SAFE_DIVIDE(bt.weekend_to, bt.total_to) >= 0.75         THEN 'Weekend'
+    ELSE 'Mixed'
+  END                                                      AS day_segment,
+
+  -- Breadth score 0–5: distinct activities user EVER did over the window
+  ( CASE WHEN uls.total_tip_count   > 0 THEN 1 ELSE 0 END
+  + CASE WHEN uls.total_messages    > 0 THEN 1 ELSE 0 END
+  + CASE WHEN uls.total_box_count   > 0 THEN 1 ELSE 0 END
+  + CASE WHEN uls.total_wheel_count > 0 THEN 1 ELSE 0 END
+  + CASE WHEN uls.total_bet_count   > 0 THEN 1 ELSE 0 END )  AS breadth_score,
+
+  -- Top streamer by lifetime follow-bet
+  tfs.top_follow_streamer,
+  tfs.top_follow_anchor_id,
+  tfs.top_follow_streamer_bet_count,
+
+  -- Top streamer by lifetime gifting (USD-weighted)
+  tgs.top_gift_streamer,
+  tgs.top_gift_anchor_id,
+  tgs.top_gift_streamer_count,
+  tgs.top_gift_streamer_usd,
+
+  -- Same streamer flag (lifetime)
+  CASE
+    WHEN tfs.top_follow_anchor_id IS NOT NULL
+     AND tgs.top_gift_anchor_id   IS NOT NULL
+     AND tfs.top_follow_anchor_id = tgs.top_gift_anchor_id
+    THEN 1 ELSE 0
+  END                                                      AS top_streamer_is_same,
+
+  -- TARGETS: ever-in-state flags (same-month coincidence for is_tfu)
+  ef.is_tfu_ever                                           AS is_tfu,
+  ef.is_gifter_ever                                        AS is_gifter,
+  ef.is_follow_bet_ever                                    AS is_follow_bet
+
+FROM user_lifetime_session uls
+CROSS JOIN date_bounds db
+LEFT JOIN ever_flags          ef  ON uls.cust_id = ef.cust_id
+LEFT JOIN bet_timing_lifetime bt  ON uls.cust_id = bt.cust_id
+LEFT JOIN customer_age        ca  ON uls.cust_id = ca.cust_id
+LEFT JOIN top_follow_streamer tfs ON uls.cust_id = tfs.cust_id
+LEFT JOIN top_gift_streamer   tgs ON uls.cust_id = tgs.cust_id
+
+-- Active-user filter: lifetime activity (any bet OR any gift)
+WHERE uls.total_bet_count >= 1
+   OR (uls.total_tip_count + uls.total_box_count + uls.total_wheel_count) > 0
+;

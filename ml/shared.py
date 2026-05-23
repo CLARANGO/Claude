@@ -62,8 +62,9 @@ ALL_FEATURES = (
 
 # ── BigQuery loader ───────────────────────────────────────────────────────────
 
-DEFAULT_TABLE    = "nf-muses.muses.tfu_user_monthly"
-DEFAULT_LOCATION = "asia-southeast1"
+DEFAULT_TABLE          = "nf-muses.muses.tfu_user_monthly"
+DEFAULT_LIFETIME_TABLE = "nf-muses.muses.tfu_user_lifetime"
+DEFAULT_LOCATION       = "asia-southeast1"
 
 # Tier → ordinal maps (real table stores these as STRING)
 TIER_MAP_AGE = {
@@ -188,6 +189,71 @@ def load_csv(path: str) -> pd.DataFrame:
     """Load from local CSV for offline dev / testing — preprocessed."""
     df = pd.read_csv(path)
     return preprocess(df)
+
+
+def preprocess_lifetime(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalise the raw tfu_user_lifetime frame (one row per cust_id).
+      - derive has_gift / has_follow_bet / total_gift_usd
+      - map STRING tiers to ordinal ints (same maps as monthly)
+      - keep *_label columns for plotting
+    No month derivation, no row-level segment flags — this is user-level.
+    """
+    df = df.copy()
+
+    if "total_gift_usd" not in df.columns:
+        df["total_gift_usd"] = (
+            df.get("total_tip_usd",   pd.Series(0, index=df.index)).fillna(0)
+            + df.get("total_box_usd", pd.Series(0, index=df.index)).fillna(0)
+            + df.get("total_wheel_usd", pd.Series(0, index=df.index)).fillna(0)
+        )
+
+    df["has_gift"] = (
+        df.get("total_tip_count",  pd.Series(0, index=df.index)).fillna(0)
+        + df.get("total_box_count",  pd.Series(0, index=df.index)).fillna(0)
+        + df.get("total_wheel_count", pd.Series(0, index=df.index)).fillna(0)
+        > 0
+    ).astype(int)
+    df["has_follow_bet"] = (
+        df.get("total_follow_bet_count", pd.Series(0, index=df.index)).fillna(0) > 0
+    ).astype(int)
+
+    if "account_age_tier" in df.columns and df["account_age_tier"].dtype == object:
+        df["account_age_tier_label"] = df["account_age_tier"]
+        df["account_age_tier"] = df["account_age_tier"].map(TIER_MAP_AGE).fillna(0).astype(int)
+
+    if "watch_bucket" in df.columns and df["watch_bucket"].dtype == object:
+        df["watch_bucket_label"] = df["watch_bucket"]
+        df["watch_bucket"] = df["watch_bucket"].map(TIER_MAP_WATCH).fillna(0).astype(int)
+
+    if "time_segment" in df.columns and df["time_segment"].dtype == object:
+        df["time_segment_label"] = df["time_segment"]
+        df["time_segment"] = (
+            df["time_segment"].str.lower().map(TIME_SEG_MAP).fillna(2).astype(int)
+        )
+
+    if "day_segment" in df.columns and df["day_segment"].dtype == object:
+        df["day_segment_label"] = df["day_segment"]
+        df["day_segment"] = (
+            df["day_segment"].str.lower().map(DAY_SEG_MAP).fillna(2).astype(int)
+        )
+
+    return df
+
+
+def load_bq_lifetime(
+    project: str,
+    table: str = DEFAULT_LIFETIME_TABLE,
+    location: str = DEFAULT_LOCATION,
+) -> pd.DataFrame:
+    """
+    Load tfu_user_lifetime from BigQuery (one row per cust_id), preprocessed.
+    Use this for EDA Sections 2-4 instead of in-Python to_user_level().
+    """
+    from google.cloud import bigquery
+    client = bigquery.Client(project=project, location=location)
+    df = client.query(f"SELECT * FROM `{table}`").to_dataframe()
+    return preprocess_lifetime(df)
 
 
 # ── EDA helpers (handle monthly-grain duplicates) ────────────────────────────
