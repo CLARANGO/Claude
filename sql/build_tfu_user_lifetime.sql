@@ -291,17 +291,17 @@ SELECT
   uls.site,
   uls.currency,
 
-  -- Loyalty (lifetime)
-  uls.sessions_count,
+  -- Loyalty (avg per observed month)
+  SAFE_DIVIDE(uls.sessions_count, ef.months_observed)      AS avg_sessions_count,
   uls.distinct_streamers,
   CASE
-    WHEN uls.sessions_count BETWEEN 1 AND 2  THEN '1-2'
-    WHEN uls.sessions_count BETWEEN 3 AND 9  THEN '3-9'
+    WHEN SAFE_DIVIDE(uls.sessions_count, ef.months_observed) BETWEEN 1 AND 2  THEN '1-2'
+    WHEN SAFE_DIVIDE(uls.sessions_count, ef.months_observed) BETWEEN 3 AND 9  THEN '3-9'
     ELSE '10+'
   END                                                      AS sessions_bucket,
 
-  -- Watch (lifetime)
-  uls.total_watch_sec,
+  -- Watch (avg per observed month)
+  SAFE_DIVIDE(uls.total_watch_sec, ef.months_observed)     AS avg_watch_sec,
   uls.avg_watch_sec_per_session,
   CASE
     WHEN uls.avg_watch_sec_per_session <  900 THEN '<15min'
@@ -310,22 +310,25 @@ SELECT
     ELSE '>45min'
   END                                                      AS watch_bucket,
 
-  -- Chat (lifetime)
-  uls.total_messages,
-  uls.chat_sessions,
-  uls.total_bullet_sec,
-  uls.total_chatroom_sec,
+  -- Chat (avg per observed month)
+  SAFE_DIVIDE(uls.total_messages,      ef.months_observed) AS avg_messages,
+  SAFE_DIVIDE(uls.chat_sessions,       ef.months_observed) AS avg_chat_sessions,
+  SAFE_DIVIDE(uls.total_bullet_sec,    ef.months_observed) AS avg_bullet_sec,
+  SAFE_DIVIDE(uls.total_chatroom_sec,  ef.months_observed) AS avg_chatroom_sec,
 
-  -- Gifting (lifetime)
-  uls.total_tip_count,   uls.total_tip_usd,
-  uls.total_box_count,   uls.total_box_usd,
-  uls.total_wheel_count, uls.total_wheel_usd,
+  -- Gifting (avg per observed month)
+  SAFE_DIVIDE(uls.total_tip_count,   ef.months_observed)   AS avg_tip_count,
+  SAFE_DIVIDE(uls.total_tip_usd,     ef.months_observed)   AS avg_tip_usd,
+  SAFE_DIVIDE(uls.total_box_count,   ef.months_observed)   AS avg_box_count,
+  SAFE_DIVIDE(uls.total_box_usd,     ef.months_observed)   AS avg_box_usd,
+  SAFE_DIVIDE(uls.total_wheel_count, ef.months_observed)   AS avg_wheel_count,
+  SAFE_DIVIDE(uls.total_wheel_usd,   ef.months_observed)   AS avg_wheel_usd,
 
-  -- Betting (lifetime)
-  uls.total_bet_count,
-  uls.total_member_to,
-  uls.total_bdw_bet_count,
-  uls.total_follow_bet_count,
+  -- Betting (avg per observed month)
+  SAFE_DIVIDE(uls.total_bet_count,        ef.months_observed) AS avg_bet_count,
+  SAFE_DIVIDE(uls.total_member_to,        ef.months_observed) AS avg_member_to,
+  SAFE_DIVIDE(uls.total_bdw_bet_count,    ef.months_observed) AS avg_bdw_bet_count,
+  SAFE_DIVIDE(uls.total_follow_bet_count, ef.months_observed) AS avg_follow_bet_count,
 
   -- Stream type preference (re-derived from lifetime session split)
   CASE

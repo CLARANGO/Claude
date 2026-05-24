@@ -194,28 +194,31 @@ def load_csv(path: str) -> pd.DataFrame:
 def preprocess_lifetime(df: pd.DataFrame) -> pd.DataFrame:
     """
     Normalise the raw tfu_user_lifetime frame (one row per cust_id).
-      - derive has_gift / has_follow_bet / total_gift_usd
+      - derive has_gift / has_follow_bet / avg_gift_usd from avg_* columns
       - map STRING tiers to ordinal ints (same maps as monthly)
       - keep *_label columns for plotting
-    No month derivation, no row-level segment flags — this is user-level.
+
+    Lifetime columns are AVG per observed month (denominator = months_observed),
+    so e.g. has_gift = (avg_tip_count + avg_box_count + avg_wheel_count) > 0
+    is equivalent to "ever-gifted in the window" since avg > 0 iff sum > 0.
     """
     df = df.copy()
 
-    if "total_gift_usd" not in df.columns:
-        df["total_gift_usd"] = (
-            df.get("total_tip_usd",   pd.Series(0, index=df.index)).fillna(0)
-            + df.get("total_box_usd", pd.Series(0, index=df.index)).fillna(0)
-            + df.get("total_wheel_usd", pd.Series(0, index=df.index)).fillna(0)
+    if "avg_gift_usd" not in df.columns:
+        df["avg_gift_usd"] = (
+            df.get("avg_tip_usd",    pd.Series(0, index=df.index)).fillna(0)
+            + df.get("avg_box_usd",   pd.Series(0, index=df.index)).fillna(0)
+            + df.get("avg_wheel_usd", pd.Series(0, index=df.index)).fillna(0)
         )
 
     df["has_gift"] = (
-        df.get("total_tip_count",  pd.Series(0, index=df.index)).fillna(0)
-        + df.get("total_box_count",  pd.Series(0, index=df.index)).fillna(0)
-        + df.get("total_wheel_count", pd.Series(0, index=df.index)).fillna(0)
+        df.get("avg_tip_count",   pd.Series(0, index=df.index)).fillna(0)
+        + df.get("avg_box_count",   pd.Series(0, index=df.index)).fillna(0)
+        + df.get("avg_wheel_count", pd.Series(0, index=df.index)).fillna(0)
         > 0
     ).astype(int)
     df["has_follow_bet"] = (
-        df.get("total_follow_bet_count", pd.Series(0, index=df.index)).fillna(0) > 0
+        df.get("avg_follow_bet_count", pd.Series(0, index=df.index)).fillna(0) > 0
     ).astype(int)
 
     if "account_age_tier" in df.columns and df["account_age_tier"].dtype == object:
