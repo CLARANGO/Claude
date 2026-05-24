@@ -11,8 +11,11 @@
 --   uses a monthly intermediate so "ever-TFU" requires gift AND follow_bet
 --   in the SAME month, not just lifetime presence of each.
 -- Pattern C — account_age_tier is computed at the latest month_end.
--- Segments — time_segment / day_segment use activity-weighted shares
---   across bets + tips + boxes + wheels (matches monthly definition).
+-- Segments — time_segment / day_segment use the UNWEIGHTED AVG across
+--   observed months of each month's share (each month counts equally).
+--   Sources: bets + tips + boxes + wheels + chat (chat uses
+--   stream_start_time as a timing proxy and contributes amount_rm = 0
+--   so it informs time_segment but not day_segment).
 -- league_segment — composite text label; raw signals exposed too.
 -- =====================================================================
 CREATE OR REPLACE TABLE `nf-muses.muses.tfu_user_lifetime` AS
@@ -34,6 +37,7 @@ sessions AS (
   SELECT
     csp.cust_id,
     DATE_TRUNC(csp.stream_start_date, MONTH)               AS month_start,
+    csp.stream_start_time,
     csp.stream_id,
     csp.anchor_id,
     csp.streamer,
@@ -148,12 +152,13 @@ user_lifetime_session AS (
   GROUP BY cust_id
 ),
 
--- 4a. Activity timing — UNION ALL of bets + tips + boxes + wheels -----
+-- 4a. Activity timing — UNION ALL of bets + tips + boxes + wheels + chat
 activity_timing_lifetime AS (
   SELECT cust_id,
-    EXTRACT(HOUR      FROM trans_dt) AS act_hour,
-    EXTRACT(DAYOFWEEK FROM trans_dt) AS act_dow,
-    member_to                        AS amount_rm
+    DATE_TRUNC(DATE(trans_dt), MONTH) AS month_start,
+    EXTRACT(HOUR      FROM trans_dt)  AS act_hour,
+    EXTRACT(DAYOFWEEK FROM trans_dt)  AS act_dow,
+    member_to                         AS amount_rm
   FROM `nf-bifrost.livestream_dm.fact_live_bet`
   CROSS JOIN date_bounds db
   WHERE site_id != 99
@@ -163,6 +168,7 @@ activity_timing_lifetime AS (
   UNION ALL
 
   SELECT cust_id,
+    DATE_TRUNC(DATE(tip_dt), MONTH),
     EXTRACT(HOUR      FROM tip_dt),
     EXTRACT(DAYOFWEEK FROM tip_dt),
     tip_amount_original * exchange_rate
@@ -175,6 +181,7 @@ activity_timing_lifetime AS (
   UNION ALL
 
   SELECT cust_id,
+    DATE_TRUNC(DATE(record_dt), MONTH),
     EXTRACT(HOUR      FROM record_dt),
     EXTRACT(DAYOFWEEK FROM record_dt),
     box_amount_rm
@@ -188,6 +195,7 @@ activity_timing_lifetime AS (
 
   -- mart_lucky_wheel has no site_id; filter by site name instead
   SELECT cust_id,
+    DATE_TRUNC(DATE(record_dt), MONTH),
     EXTRACT(HOUR      FROM record_dt),
     EXTRACT(DAYOFWEEK FROM record_dt),
     amount_rm
@@ -196,19 +204,57 @@ activity_timing_lifetime AS (
   WHERE site != 'JiooLive'
     AND DATE(record_dt) >= db.start_month
     AND DATE(record_dt) <  DATE_ADD(db.end_month, INTERVAL 1 MONTH)
+
+  UNION ALL
+
+  -- Chat sessions: no per-event log, use stream_start_time as the timing proxy.
+  -- amount_rm = 0 so chat does NOT bias day_segment (amount-weighted) but DOES
+  -- count toward time_segment (count-based).
+  SELECT cust_id,
+    month_start,
+    EXTRACT(HOUR      FROM stream_start_time) AS act_hour,
+    EXTRACT(DAYOFWEEK FROM stream_start_time) AS act_dow,
+    0                                         AS amount_rm
+  FROM sessions
+  WHERE if_chat = TRUE
 ),
 
--- 4b. Lifetime activity aggregation (day/night counts, weekday/weekend amounts) -
+-- 4b. Per-month shares — each month's day/night count split and
+-- weekday/weekend amount split, computed independently per (user, month).
+activity_agg_monthly AS (
+  SELECT
+    cust_id,
+    month_start,
+    SAFE_DIVIDE(
+      SUM(CASE WHEN act_hour BETWEEN 6 AND 17 THEN 1 ELSE 0 END),
+      COUNT(*)
+    )                                                                 AS day_share,
+    SAFE_DIVIDE(
+      SUM(CASE WHEN act_hour BETWEEN 6 AND 17 THEN 0 ELSE 1 END),
+      COUNT(*)
+    )                                                                 AS night_share,
+    SAFE_DIVIDE(
+      SUM(CASE WHEN act_dow BETWEEN 2 AND 6 THEN amount_rm ELSE 0 END),
+      SUM(amount_rm)
+    )                                                                 AS weekday_share,
+    SAFE_DIVIDE(
+      SUM(CASE WHEN act_dow IN (1,7)        THEN amount_rm ELSE 0 END),
+      SUM(amount_rm)
+    )                                                                 AS weekend_share
+  FROM activity_timing_lifetime
+  GROUP BY cust_id, month_start
+),
+
+-- 4c. Lifetime = unweighted average of per-month shares (each observed
+-- month counts equally regardless of activity volume).
 activity_agg_lifetime AS (
   SELECT
     cust_id,
-    SUM(CASE WHEN act_hour BETWEEN 6 AND 17 THEN 1 ELSE 0 END)        AS day_act_count,
-    SUM(CASE WHEN act_hour BETWEEN 6 AND 17 THEN 0 ELSE 1 END)        AS night_act_count,
-    COUNT(*)                                                          AS total_acts,
-    SUM(CASE WHEN act_dow BETWEEN 2 AND 6 THEN amount_rm ELSE 0 END)  AS weekday_amount,
-    SUM(CASE WHEN act_dow IN (1,7)        THEN amount_rm ELSE 0 END)  AS weekend_amount,
-    SUM(amount_rm)                                                    AS total_amount
-  FROM activity_timing_lifetime
+    AVG(day_share)     AS avg_day_share,
+    AVG(night_share)   AS avg_night_share,
+    AVG(weekday_share) AS avg_weekday_share,
+    AVG(weekend_share) AS avg_weekend_share
+  FROM activity_agg_monthly
   GROUP BY cust_id
 ),
 
@@ -390,19 +436,21 @@ SELECT
     ELSE 'mixed'
   END                                                      AS device_pref,
 
-  -- Time segment (lifetime, activity-count weighted across bets+tips+boxes+wheels)
+  -- Time segment (avg across observed months of each month's day/night
+  -- count share — includes chat via stream_start_time proxy)
   CASE
-    WHEN COALESCE(aa.total_acts, 0) = 0                          THEN 'no_activity'
-    WHEN SAFE_DIVIDE(aa.day_act_count,   aa.total_acts) >= 0.75  THEN 'Day'
-    WHEN SAFE_DIVIDE(aa.night_act_count, aa.total_acts) >= 0.75  THEN 'Night'
+    WHEN aa.avg_day_share IS NULL          THEN 'no_activity'
+    WHEN aa.avg_day_share   >= 0.75        THEN 'Day'
+    WHEN aa.avg_night_share >= 0.75        THEN 'Night'
     ELSE 'Mixed'
   END                                                      AS time_segment,
 
-  -- Day segment (lifetime, activity-amount weighted across all 4 sources)
+  -- Day segment (avg across observed months of each month's weekday/weekend
+  -- amount share — chat contributes amount_rm = 0 so it is excluded here)
   CASE
-    WHEN COALESCE(aa.total_amount, 0) = 0                            THEN 'no_activity'
-    WHEN SAFE_DIVIDE(aa.weekday_amount, aa.total_amount) >= 0.75     THEN 'Weekday'
-    WHEN SAFE_DIVIDE(aa.weekend_amount, aa.total_amount) >= 0.75     THEN 'Weekend'
+    WHEN aa.avg_weekday_share IS NULL      THEN 'no_activity'
+    WHEN aa.avg_weekday_share >= 0.75      THEN 'Weekday'
+    WHEN aa.avg_weekend_share >= 0.75      THEN 'Weekend'
     ELSE 'Mixed'
   END                                                      AS day_segment,
 
