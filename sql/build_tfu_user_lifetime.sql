@@ -4,12 +4,16 @@
 -- Window: last 6 completed months (same as tfu_user_monthly)
 -- Active filter: lifetime bet_count >= 1 OR any gift (tip/box/wheel) > 0
 --
--- Pattern A — lifetime re-derivation. Bucket CASEs apply the same logic
--- as build_tfu_user_monthly.sql, but on SUMs across the 6-month window.
--- Pattern B — ever-in-state for is_tfu / is_donated / is_follow_bet:
+-- Pattern A — volume metrics expressed as AVG per observed month
+--   (denominator = ever_flags.months_observed). Bucket CASEs apply the
+--   same per-month thresholds as build_tfu_user_monthly.sql.
+-- Pattern B — ever-in-state for is_tfu / is_gifter / is_follow_bet:
 --   uses a monthly intermediate so "ever-TFU" requires gift AND follow_bet
 --   in the SAME month, not just lifetime presence of each.
 -- Pattern C — account_age_tier is computed at the latest month_end.
+-- Segments — time_segment / day_segment use activity-weighted shares
+--   across bets + tips + boxes + wheels (matches monthly definition).
+-- league_segment — composite text label; raw signals exposed too.
 -- =====================================================================
 CREATE OR REPLACE TABLE `nf-muses.muses.tfu_user_lifetime` AS
 
@@ -144,26 +148,68 @@ user_lifetime_session AS (
   GROUP BY cust_id
 ),
 
--- 4. Lifetime bet timing (day/night, weekday/weekend) ------------------
-bet_timing_lifetime AS (
-  SELECT
-    flb.cust_id,
-    SUM(CASE WHEN EXTRACT(HOUR FROM flb.trans_dt) BETWEEN 6 AND 17
-             THEN 1 ELSE 0 END)                            AS day_bet_count,
-    SUM(CASE WHEN EXTRACT(HOUR FROM flb.trans_dt) BETWEEN 6 AND 17
-             THEN 0 ELSE 1 END)                            AS night_bet_count,
-    COUNT(*)                                               AS total_bets,
-    SUM(CASE WHEN EXTRACT(DAYOFWEEK FROM flb.trans_dt) BETWEEN 2 AND 6
-             THEN flb.member_to ELSE 0 END)                AS weekday_to,
-    SUM(CASE WHEN EXTRACT(DAYOFWEEK FROM flb.trans_dt) IN (1,7)
-             THEN flb.member_to ELSE 0 END)                AS weekend_to,
-    SUM(flb.member_to)                                     AS total_to
-  FROM `nf-bifrost.livestream_dm.fact_live_bet` flb
+-- 4a. Activity timing — UNION ALL of bets + tips + boxes + wheels -----
+activity_timing_lifetime AS (
+  SELECT cust_id,
+    EXTRACT(HOUR      FROM trans_dt) AS act_hour,
+    EXTRACT(DAYOFWEEK FROM trans_dt) AS act_dow,
+    member_to                        AS amount_rm
+  FROM `nf-bifrost.livestream_dm.fact_live_bet`
   CROSS JOIN date_bounds db
-  WHERE flb.site_id != 99
-    AND DATE(flb.trans_dt) >= db.start_month
-    AND DATE(flb.trans_dt) <  DATE_ADD(db.end_month, INTERVAL 1 MONTH)
-  GROUP BY flb.cust_id
+  WHERE site_id != 99
+    AND DATE(trans_dt) >= db.start_month
+    AND DATE(trans_dt) <  DATE_ADD(db.end_month, INTERVAL 1 MONTH)
+
+  UNION ALL
+
+  SELECT cust_id,
+    EXTRACT(HOUR      FROM tip_dt),
+    EXTRACT(DAYOFWEEK FROM tip_dt),
+    tip_amount_original * exchange_rate
+  FROM `nf-bifrost.livestream_dm.fact_tip_record`
+  CROSS JOIN date_bounds db
+  WHERE site_id != 99
+    AND DATE(tip_dt) >= db.start_month
+    AND DATE(tip_dt) <  DATE_ADD(db.end_month, INTERVAL 1 MONTH)
+
+  UNION ALL
+
+  SELECT cust_id,
+    EXTRACT(HOUR      FROM record_dt),
+    EXTRACT(DAYOFWEEK FROM record_dt),
+    box_amount_rm
+  FROM `nf-bifrost.livestream_dm.mart_lucky_box`
+  CROSS JOIN date_bounds db
+  WHERE site_id != 99
+    AND DATE(record_dt) >= db.start_month
+    AND DATE(record_dt) <  DATE_ADD(db.end_month, INTERVAL 1 MONTH)
+
+  UNION ALL
+
+  -- mart_lucky_wheel has no site_id; filter by site name instead
+  SELECT cust_id,
+    EXTRACT(HOUR      FROM record_dt),
+    EXTRACT(DAYOFWEEK FROM record_dt),
+    amount_rm
+  FROM `nf-bifrost.livestream_dm.mart_lucky_wheel`
+  CROSS JOIN date_bounds db
+  WHERE site != 'JiooLive'
+    AND DATE(record_dt) >= db.start_month
+    AND DATE(record_dt) <  DATE_ADD(db.end_month, INTERVAL 1 MONTH)
+),
+
+-- 4b. Lifetime activity aggregation (day/night counts, weekday/weekend amounts) -
+activity_agg_lifetime AS (
+  SELECT
+    cust_id,
+    SUM(CASE WHEN act_hour BETWEEN 6 AND 17 THEN 1 ELSE 0 END)        AS day_act_count,
+    SUM(CASE WHEN act_hour BETWEEN 6 AND 17 THEN 0 ELSE 1 END)        AS night_act_count,
+    COUNT(*)                                                          AS total_acts,
+    SUM(CASE WHEN act_dow BETWEEN 2 AND 6 THEN amount_rm ELSE 0 END)  AS weekday_amount,
+    SUM(CASE WHEN act_dow IN (1,7)        THEN amount_rm ELSE 0 END)  AS weekend_amount,
+    SUM(amount_rm)                                                    AS total_amount
+  FROM activity_timing_lifetime
+  GROUP BY cust_id
 ),
 
 -- 5. User × streamer aggregation (lifetime, for top-streamer features) -
@@ -344,25 +390,33 @@ SELECT
     ELSE 'mixed'
   END                                                      AS device_pref,
 
-  -- Time segment (lifetime, bet-count weighted)
+  -- Time segment (lifetime, activity-count weighted across bets+tips+boxes+wheels)
   CASE
-    WHEN COALESCE(bt.total_bets, 0) = 0                          THEN 'no_bets'
-    WHEN SAFE_DIVIDE(bt.day_bet_count,   bt.total_bets) >= 0.75  THEN 'Day'
-    WHEN SAFE_DIVIDE(bt.night_bet_count, bt.total_bets) >= 0.75  THEN 'Night'
+    WHEN COALESCE(aa.total_acts, 0) = 0                          THEN 'no_activity'
+    WHEN SAFE_DIVIDE(aa.day_act_count,   aa.total_acts) >= 0.75  THEN 'Day'
+    WHEN SAFE_DIVIDE(aa.night_act_count, aa.total_acts) >= 0.75  THEN 'Night'
     ELSE 'Mixed'
   END                                                      AS time_segment,
 
-  -- Day segment (lifetime, turnover weighted)
+  -- Day segment (lifetime, activity-amount weighted across all 4 sources)
   CASE
-    WHEN COALESCE(bt.total_to, 0) = 0                            THEN 'no_bets'
-    WHEN SAFE_DIVIDE(bt.weekday_to, bt.total_to) >= 0.75         THEN 'Weekday'
-    WHEN SAFE_DIVIDE(bt.weekend_to, bt.total_to) >= 0.75         THEN 'Weekend'
+    WHEN COALESCE(aa.total_amount, 0) = 0                            THEN 'no_activity'
+    WHEN SAFE_DIVIDE(aa.weekday_amount, aa.total_amount) >= 0.75     THEN 'Weekday'
+    WHEN SAFE_DIVIDE(aa.weekend_amount, aa.total_amount) >= 0.75     THEN 'Weekend'
     ELSE 'Mixed'
   END                                                      AS day_segment,
 
-  -- League segment (lifetime: leagues with >=25% share of total turnover)
+  -- League dominance (raw signal — leagues with >=25% share of lifetime turnover)
   ls.dominant_count,
   ls.dominant_league,
+
+  -- League segment (composite text label, matches monthly table)
+  CASE
+    WHEN uls.total_bet_count = 0                                  THEN 'non-bettor'
+    WHEN ls.dominant_count IS NULL OR ls.dominant_count = 0       THEN 'No dominant league'
+    WHEN ls.dominant_count = 1  THEN CONCAT(ls.dominant_league, ' player')
+    ELSE 'multi-league player'
+  END                                                      AS league_segment,
 
   -- Breadth score 0–5: distinct activities user EVER did over the window
   ( CASE WHEN uls.total_tip_count   > 0 THEN 1 ELSE 0 END
@@ -398,7 +452,7 @@ SELECT
 FROM user_lifetime_session uls
 CROSS JOIN date_bounds db
 LEFT JOIN ever_flags          ef  ON uls.cust_id = ef.cust_id
-LEFT JOIN bet_timing_lifetime bt  ON uls.cust_id = bt.cust_id
+LEFT JOIN activity_agg_lifetime aa ON uls.cust_id = aa.cust_id
 LEFT JOIN customer_age        ca  ON uls.cust_id = ca.cust_id
 LEFT JOIN top_follow_streamer tfs ON uls.cust_id = tfs.cust_id
 LEFT JOIN top_gift_streamer   tgs ON uls.cust_id = tgs.cust_id
