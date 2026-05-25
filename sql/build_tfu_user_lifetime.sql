@@ -337,8 +337,8 @@ league_pct_lifetime AS (
 league_segment_lifetime AS (
   SELECT
     cust_id,
-    COUNTIF(pct >= 0.25 AND league != 'Unmapped Match')                          AS dominant_count,
-    MAX(CASE WHEN pct >= 0.25 AND league != 'Unmapped Match' THEN league END)    AS dominant_league
+    COUNTIF(pct >= 0.30 AND league != 'Unmapped Match')                          AS dominant_count,
+    MAX(CASE WHEN pct >= 0.30 AND league != 'Unmapped Match' THEN league END)    AS dominant_league
   FROM league_pct_lifetime
   GROUP BY cust_id
 ),
@@ -454,7 +454,7 @@ SELECT
     ELSE 'Mixed'
   END                                                      AS day_segment,
 
-  -- League dominance (raw signal — leagues with >=25% share of lifetime turnover)
+  -- League dominance (raw signal — leagues with >=30% share of lifetime turnover)
   ls.dominant_count,
   ls.dominant_league,
 
