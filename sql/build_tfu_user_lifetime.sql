@@ -226,12 +226,12 @@ activity_agg_monthly AS (
     cust_id,
     month_start,
     SAFE_DIVIDE(
-      SUM(CASE WHEN act_hour BETWEEN 6 AND 17 THEN 1 ELSE 0 END),
-      COUNT(*)
+      SUM(CASE WHEN act_hour BETWEEN 6 AND 18 THEN amount_rm ELSE 0 END),
+      SUM(amount_rm)
     )                                                                 AS day_share,
     SAFE_DIVIDE(
-      SUM(CASE WHEN act_hour BETWEEN 6 AND 17 THEN 0 ELSE 1 END),
-      COUNT(*)
+      SUM(CASE WHEN act_hour BETWEEN 6 AND 18 THEN amount_rm ELSE 0 END),
+      SUM(amount_rm)
     )                                                                 AS night_share,
     SAFE_DIVIDE(
       SUM(CASE WHEN act_dow BETWEEN 2 AND 6 THEN amount_rm ELSE 0 END),
