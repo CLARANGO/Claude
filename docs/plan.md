@@ -142,7 +142,7 @@ Definitions:
 
 ```
 NS Follow Streamer Bet Count        = SUM(follow_bet_count)
-NS Donation Amount (incl. Tips)     = SUM(tip_amount_rm) + SUM(box_amount_rm) + SUM(wheel_amount_rm)   ← needs confirmation
+NS Donation Amount (incl. Tips)     = {SUM(tip_amount_rm) + SUM(box_amount_rm) + SUM(wheel_amount_rm)}/4.2 AS papa
 L1 Recommend Bet Count              = SUM(chatroom_recommend.RecommendCount)  on SabaMatchId × AnchorId
 L1 Follow Streamer Bet Turnover     = SUM(follow_member_to)
 L1 Follow User Count                = COUNT(DISTINCT cust_id) WHERE follow_bet_count > 0
@@ -152,9 +152,6 @@ L1 Tip Count                        = SUM(tip_count)
 L1 Tip User Count                   = COUNT(DISTINCT cust_id) WHERE if_tip = 1
 L1 Stream Count                     = COUNT(DISTINCT stream_id) at streamer × period grain
 L2 Follow Streamer (bet)            = SUM(follow_bet_count), SUM(follow_member_to)
-L2 Follow User/Player (bet)         = SUM(follow_player_bet_count), SUM(follow_player_member_to)
-L2 Follow System (bet)              = NOT IN core_streaming_performance — derive from fact_live_bet.follow_type
-L2 Self (bet)                       = total bet_count − follow_bet_count − follow_player_bet_count − follow_system_bet_count
 L2 Bet During Watch — Count         = SUM(during_watch_bet_count)
 L2 Bet During Watch — Turnover      = SUM(during_watch_member_to)
 L2 Watch Time total                 = SUM(watch_sec)
@@ -168,11 +165,10 @@ Viewers                             = COUNT(DISTINCT cust_id WHERE if_watch = 1)
 - For "Bet During Watch" we don't need to recompute the overlap — the `during_watch_*` columns and `is_during_watch` flag are pre-computed
 
 ### Open data questions (small, can be resolved in one probe each)
-1. **Donation composition** — does "Donation" = tip only, or tip + box + wheel? Default: include all three.
-2. **Follow System category** — is it `fact_live_bet.follow_type = 'system'` or similar? Distinct-value probe needed.
-3. **World Cup filter value** — exact string in `match_info.League` / `LeagueGroup` for World Cup 2026.
-4. **Match stage** — needs manual mapping or derive from match date + bracket structure.
-5. **`is_lic` column** — meaning? (suspect "logged-in customer"). Filter or ignore?
+1. **Donation composition** — does "Donation" = tip + box + wheel? Default: include all three.
+2. **World Cup filter value** — exact string in `match_info.League` / `LeagueGroup` for World Cup 2026.
+3. **Match stage** — needs manual mapping or derive from match date + bracket structure.
+4. **`is_lic` column** — meaning? (suspect "logged-in customer"). Filter or ignore?
 
 ---
 
