@@ -1,7 +1,7 @@
 -- Region: asia-southeast1 (Singapore). Run with --location=asia-southeast1.
 -- agg_session_metrics — one row per stream session
 -- Source: nf-bifrost.livestream_dm.core_streaming_performance (cust_id × stream_id grain)
--- PCU source: nf-bifrost.livestream_dm.mart_comprehensive_metrics (joined on stream_id/streamer/anchor_id)
+-- PCU source: nf-bifrost.livestream_dm.fact_stream_viewship (joined on stream_id / anchor_id)
 --
 -- Applies bq-filter-rules:
 --   is_lic=1, is_shared IS TRUE, is_cancelled IS FALSE, site_id != 99 (chatroom),
@@ -15,17 +15,13 @@
 -- TODOs (resolve via Phase 0 probes):
 --   [Q3] World Cup filter string in match_info.League (likely 'WORLD CUP')
 
-CREATE OR REPLACE TABLE `nf-muses.worldcup.agg_session_metrics`
-PARTITION BY day
-CLUSTER BY streamer_id, stream_id
-AS
 WITH
   -- Per-stream aggregation of customer-session rows
   by_stream AS (
     SELECT
       csp.stream_id,
       ANY_VALUE(csp.anchor_id)         AS streamer_id,
-      ANY_VALUE(csp.streamer)          AS streamer_name,
+      ANY_VALUE(csp.streamer)          AS streamer,
       ANY_VALUE(CASE
         WHEN csp.stream_type LIKE 'Sport%' THEN 'sports'
         ELSE 'entertainment'
@@ -34,7 +30,7 @@ WITH
       ANY_VALUE(csp.stream_name)       AS stream_name,
       ANY_VALUE(csp.stream_start_time) AS start_ts,
       ANY_VALUE(csp.stream_end_time)   AS end_ts,
-      DATE(ANY_VALUE(csp.stream_start_time), 'Asia/Taipei') AS day,
+      DATE(ANY_VALUE(csp.stream_start_date)) AS day,
       ANY_VALUE(csp.country)           AS language,
       ANY_VALUE(csp.site)              AS site,
       ANY_VALUE(csp.currency)          AS currency,
@@ -69,16 +65,15 @@ WITH
       SUM(csp.during_watch_bet_count)  AS bdw_bet_count,
 
       -- Watch
-      SUM(csp.watch_sec) AS watch_seconds_total,
+      SUM(csp.watch_sec)/60 AS watch_min_total,
       COUNT(DISTINCT IF(csp.if_watch IS TRUE, csp.cust_id, NULL)) AS viewers,
       COUNT(DISTINCT CASE WHEN csp.watch_sec >= 600 THEN csp.cust_id END) AS watch_over_10min_user,
-      COUNT(DISTINCT IF(csp.if_chat IS TRUE, csp.cust_id, NULL)) AS chatters,
+      COUNT(DISTINCT IF(csp.if_chat IS TRUE, csp.cust_id, NULL)) AS chat_user,
       SUM(csp.message_count) AS message_count,
       MAX(mcm.call_pcu) AS pcu
     FROM `nf-bifrost.livestream_dm.core_streaming_performance` csp
-    LEFT JOIN `nf-bifrost.livestream_dm.mart_comprehensive_metrics` mcm
+    LEFT JOIN `nf-bifrost.livestream_dm.fact_stream_viewship` mcm
       ON  csp.stream_id = mcm.stream_id
-      AND csp.streamer  = mcm.streamer
       AND csp.anchor_id = mcm.anchor_id
     WHERE csp.is_lic = 1
       AND csp.is_shared IS TRUE
@@ -88,9 +83,9 @@ WITH
       AND csp.streamer != 'ID_N/A'
       AND csp.streamer NOT LIKE 'ID_%'
       AND csp.currency != 'UUS' AND csp.currency_id != 20
-      AND DATE(csp.stream_start_time, 'Asia/Taipei') BETWEEN DATE '2026-06-01' AND DATE '2026-07-31'
+      AND DATE(csp.stream_start_date) BETWEEN DATE '2026-05-01' AND DATE '2026-05-31'
     GROUP BY csp.stream_id
-  ),
+      ),
 
   -- Streamer recommendations (L1 Recommend Bet Count)
   by_stream_recommend AS (
@@ -102,7 +97,7 @@ WITH
     GROUP BY cr.AnchorId, cr.SabaMatchId
   ),
 
-  -- Match dim — World Cup filter + time-slot tag (no `prime` per revised plan)
+  -- Match dim — World Cup filter + time-slot tag + 7-stage bracket
   match_dim AS (
     SELECT
       SabaMatchId,
@@ -110,25 +105,34 @@ WITH
       KickOffTime,
       League,
       LeagueGroup,
-      HomeCnName,
-      AwayCnName,
       CASE
-        WHEN EXTRACT(HOUR FROM KickOffTime AT TIME ZONE 'Asia/Taipei') BETWEEN 0  AND 5  THEN 'late_night'
-        WHEN EXTRACT(HOUR FROM KickOffTime AT TIME ZONE 'Asia/Taipei') BETWEEN 6  AND 11 THEN 'morning'
+        WHEN EXTRACT(HOUR FROM KickOffTime) BETWEEN 0  AND 5  THEN 'late_night'
+        WHEN EXTRACT(HOUR FROM KickOffTime) BETWEEN 6  AND 11 THEN 'morning'
         ELSE 'afternoon'
       END AS time_slot_taipei,
-      EXTRACT(DAYOFWEEK FROM DATE(KickOffTime, 'Asia/Taipei')) AS day_of_week
+      EXTRACT(DAYOFWEEK FROM DATE(KickOffTime)) AS day_of_week,
+      CASE
+        WHEN DATE(KickOffTime) BETWEEN '2026-06-11' AND '2026-06-28' THEN 'group'
+        WHEN DATE(KickOffTime) BETWEEN '2026-06-29' AND '2026-07-04' THEN 'R32'
+        WHEN DATE(KickOffTime) BETWEEN '2026-07-05' AND '2026-07-08' THEN 'R16'
+        WHEN DATE(KickOffTime) BETWEEN '2026-07-10' AND '2026-07-12' THEN 'QF'
+        WHEN DATE(KickOffTime) BETWEEN '2026-07-15' AND '2026-07-16' THEN 'SF'
+        WHEN DATE(KickOffTime) = '2026-07-19' THEN '3rd_place'
+        WHEN DATE(KickOffTime) = '2026-07-20' THEN 'final'
+        ELSE 'other'
+      END AS match_stage
     FROM `nf-bifrost.LiveStreaming.match_info`
     WHERE isCancelled = FALSE
       -- TODO [Q3]: confirm exact World Cup string (likely 'WORLD CUP')
-      AND UPPER(League) LIKE '%WORLD CUP%'
+   --  AND UPPER(League) LIKE '%WORLD CUP%'
   )
 
 SELECT
   CURRENT_DATE('Asia/Taipei') AS as_of_date,
   s.stream_id,
   s.streamer_id,
-  s.streamer_name,
+  s.streamer,
+  s.stream_name,
   s.day,
   s.start_ts,
   s.end_ts,
@@ -138,11 +142,10 @@ SELECT
   s.currency,
   -- Match info
   m.SabaMatchId,
-  m.HomeCnName,
-  m.AwayCnName,
   m.KickOffTime,
   m.time_slot_taipei,
   m.day_of_week,
+  m.match_stage,
   -- NS
   s.follow_streamer_bet_count,
   s.bdw_turnover_rm,
@@ -159,24 +162,15 @@ SELECT
   s.box_count,
   s.wheel_amount_usd,
   s.wheel_count,
-  -- L2 — Self = total − follow_streamer − follow_user (no Follow System in this dashboard)
-  GREATEST(s.total_bet_count
-           - s.follow_streamer_bet_count
-           - s.follow_user_bet_count, 0) AS self_bet_count,
-  s.follow_user_bet_count,
-  GREATEST(s.total_bet_turnover_rm
-           - s.follow_streamer_bet_turnover_rm
-           - s.follow_user_bet_turnover_rm, 0) AS self_bet_turnover_rm,
-  s.follow_user_bet_turnover_rm,
   -- L2 — bet during watch count + watch
   s.bdw_bet_count,
-  s.watch_seconds_total,
+  s.watch_min_total,
   s.viewers,
   s.watch_over_10min_user,
-  SAFE_DIVIDE(s.watch_seconds_total, s.viewers) AS watch_seconds_per_viewer,
+  SAFE_DIVIDE(s.watch_min_total, s.viewers) AS watch_min_per_viewer,
   s.pcu,
   -- Engagement extras
-  s.chatters,
+  s.chat_user,
   s.message_count,
   -- Raw totals
   s.total_bet_count,
