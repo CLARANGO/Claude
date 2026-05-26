@@ -102,7 +102,7 @@ Schemas: Month \	kickoffday\	timehour \	KickOffTime	\ Item \	League	\Team	\count
 
 **Scope A — Match-level (per match our streamers covered):**
 - Our bet turnover / Platform bet turnover on that match = **match share**
-- Our bet count / Platform bet count = **match share of bets**
+- Our bet count / Platform bet count  on that match = **match share of bets**
 - Our avg bet size vs platform avg bet size
 - Rolls up by streamer / week / month
 
@@ -119,7 +119,7 @@ Definitions:
 
 ## BQ Schema Map (resolved from claude.ai skill)
 
-**Project + region:** `nf-bifrost` (chatroom/livestream data) + `nf-muses` (TFU features). **All datasets live in `asia-southeast1` (Singapore).** **Reporting destination is `nf-muses.reporting.*`** — agg tables live in `nf-muses`, not `nf-bifrost`. Source reads from `nf-bifrost.*` are cross-project but same-region (allowed). Scheduled queries must run with `--location=asia-southeast1`.
+**Project + region:** `nf-bifrost` (chatroom/livestream data) + `nf-muses` (TFU features). **All datasets live in `asia-southeast1` (Singapore).** **Reporting destination is `nf-muses.worldcup.*`** — agg tables live in `nf-muses`, not `nf-bifrost`. Source reads from `nf-bifrost.*` are cross-project but same-region (allowed). Scheduled queries must run with `--location=asia-southeast1`.
 
 ### Primary fact tables
 
@@ -134,41 +134,44 @@ Definitions:
 
 | Table | Use |
 |---|---|
-| `nf-bifrost.LiveStreaming.match_info` | dim_match — has `SabaMatchId`, `KickOffTime`, `League`, `LeagueGroup`, `HomeCnName`, `AwayCnName`, `isCancelled`. **No stage column** — needs manual tagging for group/R16/QF/SF/final. |
-| `nf-bifrost.LiveStreaming.chatroom_anchor` | dim_streamer — `Id` (= anchor_id), `Name`, `Provider`, `Language`, `Status`. |
+| `nf-bifrost.LiveStreaming.match_info` | dim_match — has `SabaMatchId`, `KickOffTime`, 'kickoffday', `League`, `Team`, `Shared`, `isCancelled`, `country`,	`Streamer`, `AnchorId`. **No stage column** — needs manual tagging for group/R16/QF/SF/final. |
+| `nf-bifrost.LiveStreaming.chatroom_anchor` | dim_streamer — `Id` (= anchor_id), `Name`, `Provider` (= Supplier), `Language`, `Status`. |
 | `nf-bifrost.VN_CTS_Data.CTSCustomer` | User attrs if needed. Join key is `CustID` (capital). `CreatedDate` is UTC-4 → convert with `DATETIME(TIMESTAMP(CreatedDate,'UTC-4'),'Asia/Taipei')`. Dedup with `QUALIFY ROW_NUMBER() OVER (PARTITION BY CustID ORDER BY ModifiedTime DESC) = 1`. |
 
 ### Column-to-metric mapping (in core_streaming_performance)
 
 ```
 NS Follow Streamer Bet Count        = SUM(follow_bet_count)
-NS Donation Amount (incl. Tips)     = {SUM(tip_amount_rm) + SUM(box_amount_rm) + SUM(wheel_amount_rm)}/4.2 AS papa
+NS Donation Amount (incl. Tips)     = {SUM(tip_amount_rm) + SUM(box_amount_rm) + SUM(wheel_amount_rm)}/4.2 
+NS Bet During Watch — Turnover      = SUM(during_watch_member_to)
 L1 Recommend Bet Count              = SUM(chatroom_recommend.RecommendCount)  on SabaMatchId × AnchorId
 L1 Follow Streamer Bet Turnover     = SUM(follow_member_to)
 L1 Follow User Count                = COUNT(DISTINCT cust_id) WHERE follow_bet_count > 0
-L1 Donation User Count              = COUNT(DISTINCT cust_id) WHERE if_tip = 1 (or if_tip|if_box|if_wheel)
+L1 Donation User Count              = COUNT(DISTINCT cust_id) WHERE if_tip|if_box|if_wheel = 1
 L1 Tip Amount                       = SUM(tip_amount_rm)
 L1 Tip Count                        = SUM(tip_count)
 L1 Tip User Count                   = COUNT(DISTINCT cust_id) WHERE if_tip = 1
 L1 Stream Count                     = COUNT(DISTINCT stream_id) at streamer × period grain
 L2 Follow Streamer (bet)            = SUM(follow_bet_count), SUM(follow_member_to)
 L2 Bet During Watch — Count         = SUM(during_watch_bet_count)
-L2 Bet During Watch — Turnover      = SUM(during_watch_member_to)
-L2 Watch Time total                 = SUM(watch_sec)
-L2 Watch Time per viewer            = SUM(watch_sec) / COUNT(DISTINCT cust_id WHERE if_watch = 1)
+L2 Bet During Watch — User          = COUNT(DISTINCT cust_id) WHERE during_watch_bet_count > 0
+L2 Bet During Watch — Bet size      = SUM(during_watch_member_to)/SUM(during_watch_bet_count)
+L2 Watch Time total                 = SUM(watch_sec)/60
+L2 Watch Time per viewer            = (SUM(watch_sec)/60) / COUNT(DISTINCT cust_id WHERE if_watch = 1)
 Viewers                             = COUNT(DISTINCT cust_id WHERE if_watch = 1)
+Viewers over 10mins                 = COUNT(DISTINCT cust_id WHERE if_watch = 1) AND SUM(watch_sec)/60 >= 10min
 ```
 
 ### Filters
 - `is_cancelled = FALSE` (exclude cancelled streams)
-- World Cup filter: `match_info.League` or `LeagueGroup` matching "FIFA World Cup" (exact value TBD — needs distinct-value probe)
+- World Cup filter: `match_info.League` matching "WORLD CUP" (exact value TBD — needs distinct-value probe)
 - For "Bet During Watch" we don't need to recompute the overlap — the `during_watch_*` columns and `is_during_watch` flag are pre-computed
 
 ### Open data questions (small, can be resolved in one probe each)
 1. **Donation composition** — does "Donation" = tip + box + wheel? Default: include all three.
-2. **World Cup filter value** — exact string in `match_info.League` / `LeagueGroup` for World Cup 2026.
+2. **World Cup filter value** — exact string in `match_info.League` : WORLD CUP
 3. **Match stage** — needs manual mapping or derive from match date + bracket structure.
-4. **`is_lic` column** — meaning? (suspect "logged-in customer"). Filter or ignore?
+4. **`is_lic` column** — meaning? (suspect "logged-in customer"). is_lic =1 or site group = Licensee
 
 ---
 
@@ -327,8 +330,10 @@ KPI snapshot (yesterday vs rolling-5 median):
   Tip Amount (RM)                 <total>   ▲/▼ <%>
   Tip Count                       <total>   ▲/▼ <%>
 
-🏆 Top 3 streamers (by Follow Streamer Bet Count)
-⚽ Top 3 matches
+⚽ Top 1 match + streamer highest Follow bet count
+⚽ Top 1 match + streamer highest BdW turnover
+⚽ Top 1 match + streamer highest Donation
+
 
 ⚠️ <N> alerts overnight — see thread
 ```
@@ -347,8 +352,8 @@ Implementation in `apps_script/alerts.gs` → `runDaily()`; scheduled at 08:00 T
 | Follow Streamer Bet Turnover | ≤ −30% | ≤ −50% |
 | Bet During Watch Count | ≤ −30% | ≤ −50% |
 | Bet During Watch Turnover | ≤ −30% | ≤ −50% |
-| Tip Amount | ≤ −40% | ≤ −60% |
-| Tip Count | ≤ −40% | ≤ −60% |
+| Donation Amount | ≤ −40% | ≤ −60% |
+| Donation Count | ≤ −40% | ≤ −60% |
 
 **Weekly:** weekly stream count drops >20% vs rolling-4-week median.
 **Anomaly:** any of the 6 KPIs outside rolling-5 median ± 2 × MAD → medium.
