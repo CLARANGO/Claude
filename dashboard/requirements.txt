@@ -1,0 +1,7 @@
+dash>=2.16
+dash-bootstrap-components>=1.5
+plotly>=5.20
+google-cloud-bigquery>=3.20
+pandas>=2.1
+db-dtypes>=1.2
+diskcache>=5.6
