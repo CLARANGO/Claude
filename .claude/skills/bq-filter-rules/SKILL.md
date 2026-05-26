@@ -89,6 +89,14 @@ WHERE TIMESTAMP_TRUNC(_PARTITIONTIME, DAY) BETWEEN TIMESTAMP("start") AND TIMEST
 
 **Test currencies — always exclude:** `currency != 'UUS' AND currency_id != 20`
 
+### Currency policy override — worldcup dashboard
+
+For the World Cup streamer dashboard (`nf-muses.worldcup.*`):
+
+- **Turnover stays RM** — `member_to`, `follow_member_to`, `during_watch_member_to`, `follow_player_member_to` are reported raw, no `/4.2`. Standard alias: `*_turnover_rm`.
+- **Donation / tip / box / wheel amounts convert to USD** — divide by `4.2`. Alias: `*_amount_usd` or `*_usd`.
+- Rationale: betting stakes are interpreted at site currency parity; donations are normalized for cross-site comparison.
+
 ---
 
 ## Column naming conventions
@@ -96,9 +104,9 @@ WHERE TIMESTAMP_TRUNC(_PARTITIONTIME, DAY) BETWEEN TIMESTAMP("start") AND TIMEST
 | Raw expression                                                | Standard alias            |
 |---------------------------------------------------------------|---------------------------|
 | `during_watch_bet_count`                                      | `bdw_bet_count`           |
-| `during_watch_member_to`                                      | `bdw_turnover`            |
+| `during_watch_member_to`                                      | `bdw_turnover_rm`         |
 | Any `during_watch_*`                                          | `bdw_*`                   |
-| `follow_member_to`                                            | `follow_turnover`         |
+| `follow_member_to`                                            | `follow_streamer_bet_turnover_rm` |
 | `*_amount_rm / 4.2`                                           | `*_amount_usd` or `*_usd` |
 | `country` (in core_streaming_performance context)             | `language`                |
 | `stream_start_date`                                           | `day`                     |

@@ -25,7 +25,7 @@ apps_script/
 ## Build order
 
 1. **Phase 0** — run `sql/phase0_discovery.sql` against the streaming BQ dataset; produce schema map + gap report.
-2. **Phase 1** — fill `__RAW_*__` placeholders in agg-table SQL with discovered table/column names; schedule daily 06:00 Taipei.
+2. **Phase 1** — fill remaining TODOs in agg-table SQL with discovered values; schedule daily 13:00 Taipei.
 3. **Phase 2** — connect BQ → Sheets (one tab per agg table).
 4. **Phase 3** — build Looker Studio dashboard (4 tabs: Session / Weekly+Monthly / Platform / Alert log).
 5. **Phase 4** — deploy `apps_script/alerts.gs` to the Sheet; configure Slack webhook + min-volume gate.
@@ -36,25 +36,24 @@ apps_script/
 
 - Source: `nf-bifrost` — `livestream_dm` + `LiveStreaming` + `VN_CTS_Data`
 - Reference: `nf-muses.muses` — TFU user-month features
-- Reporting output: `nf-muses.reporting.agg_*` tables
+- Reporting output: `nf-muses.worldcup.agg_*` and `nf-muses.worldcup.dim_*` tables
 
-Before running any agg SQL: create the `reporting` dataset in `asia-southeast1`:
+Before running any agg SQL: create the `worldcup` dataset in `asia-southeast1`:
 ```bash
-bq --location=asia-southeast1 mk --dataset nf-muses:reporting
+bq --location=asia-southeast1 mk --dataset nf-muses:worldcup
 ```
 Scheduled queries that build agg tables must also be created with `--location=asia-southeast1`.
 
-See `.claude/skills/bq-schemas/SKILL.md` for the full schema map and `.claude/skills/bq-filter-rules/SKILL.md` for required WHERE clauses, USD conversion (MYR / 4.2), and column aliases (bdw_*, *_usd, day, language).
+See `.claude/skills/bq-schemas/SKILL.md` for the full schema map and `.claude/skills/bq-filter-rules/SKILL.md` for required WHERE clauses, currency conventions, and column aliases (bdw_*, *_turnover_rm, *_usd, day, language).
 
-**Reporting currency: USD.** All amount columns in agg tables are MYR-converted via `/4.2` (chatroom).
+**Reporting currency:** turnover (`*_turnover_rm`) is **RM**; donation / tip / box / wheel amounts (`*_usd`) are **USD** (MYR / 4.2).
 
 ## Open data questions (resolve via `sql/phase0_discovery.sql`)
 
 1. Donation composition — tip + box + wheel, or tip only?
-2. `fact_live_bet.follow_type` value for Follow System category
-3. Exact World Cup string in `match_info.League` / `LeagueGroup`
-4. `is_lic` meaning + `status_id` non-voided values
-5. `core_streaming_performance` ↔ `match_info` join key (currently anchor + time window)
+2. Exact World Cup string in `match_info.League` (likely `WORLD CUP`)
+3. `is_lic` meaning + `status_id` non-voided values
+4. Match-stage date fit — distinct kickoff dates match the 7-stage map
 
 ## Slack webhook
 

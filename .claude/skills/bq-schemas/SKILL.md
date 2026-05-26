@@ -13,7 +13,9 @@ This skill is a reference for the BQ tables backing the streamer performance das
 
 **All BigQuery work — datasets, scheduled queries, materialized tables — must be in `asia-southeast1`.** Cross-region joins are not allowed.
 
-**Reporting destination:** the dashboard's `agg_*` and `dim_*` tables are written to **`nf-muses.reporting.*`** (region `asia-southeast1`). Source reads from `nf-bifrost.*` are cross-project but same-region, which BigQuery allows.
+**Reporting destination:** the dashboard's `agg_*` and `dim_*` tables are written to **`nf-muses.worldcup.*`** (region `asia-southeast1`). Source reads from `nf-bifrost.*` are cross-project but same-region, which BigQuery allows.
+
+**Currency policy (worldcup dashboard):** turnover (`member_to` family) stays in **RM** — columns aliased `*_turnover_rm`. Donation / tip / box / wheel amounts convert to **USD** via `/4.2`.
 
 **Default filters:**
 - `is_cancelled = FALSE` on streams
@@ -267,19 +269,19 @@ JOIN core_streaming_performance csp
 | Dashboard metric | Source |
 |---|---|
 | NS Follow Streamer Bet Count | `SUM(csp.follow_bet_count)` grouped by stream_id |
-| NS Donation Amount (incl. Tips) | `SUM(tip_amount_rm + box_amount_rm + wheel_amount_rm)` — confirm composition |
+| NS Bet During Watch Turnover (RM) | `SUM(csp.during_watch_member_to)` — raw RM, no /4.2 |
+| NS Donation Amount (USD, incl. Tips) | `(SUM(tip_amount_rm)+SUM(box_amount_rm)+SUM(wheel_amount_rm)) / 4.2` |
 | L1 Recommend Bet Count | `SUM(chatroom_recommend.RecommendCount)` joined on SabaMatchId × AnchorId |
-| L1 Follow Streamer Bet Turnover | `SUM(csp.follow_member_to)` |
+| L1 Follow Streamer Bet Turnover (RM) | `SUM(csp.follow_member_to)` — raw RM, no /4.2 |
 | L1 Follow User Count | `COUNT(DISTINCT cust_id) WHERE follow_bet_count > 0` |
 | L1 Donation User Count | `COUNT(DISTINCT cust_id) WHERE if_tip = 1 OR if_box = 1 OR if_wheel = 1` |
-| L1 Tip Amount / Count / User Count | `SUM(tip_amount_rm)` / `SUM(tip_count)` / `COUNT(DISTINCT cust_id) WHERE if_tip=1` |
-| L1 Stream Count | `COUNT(DISTINCT stream_id)` per streamer × period |
-| L2 Bet Count (Follow Streamer) | `SUM(follow_bet_count)` |
-| L2 Bet Count (Follow Player/User) | `SUM(follow_player_bet_count)` |
-| L2 Bet Count (Follow System) | from `fact_live_bet` where `follow_type = '<system value>'` |
-| L2 Bet Count (Self) | total `bet_count` − follow_streamer − follow_player − follow_system |
-| L2 Bet During Watch — Count / Turnover | `SUM(during_watch_bet_count)` / `SUM(during_watch_member_to)` |
-| L2 Watch Time | `SUM(watch_sec)` |
+| L1 Donation Count | `SUM(tip_count) + SUM(box_count) + SUM(wheel_count)` |
+| L1 Tip / Box / Wheel Amount (USD) | `SUM(*_amount_rm) / 4.2` for each channel |
+| L1 Tip / Box / Wheel Count | `SUM(tip_count)` / `SUM(box_count)` / `SUM(wheel_count)` |
+| L1 Stream Count | `COUNT(DISTINCT CONCAT(anchor_id,'-',stream_id))` per streamer × period |
+| L2 Bet Turnover (Follow Streamer / Follow User / Self) | `follow_member_to` / `follow_player_member_to` / (total − the other two). No Follow System in this dashboard. |
+| L2 Bet During Watch — Count | `SUM(during_watch_bet_count)` |
+| L2 Watch Time | `SUM(watch_sec)` total + avg per viewer; **PCU** not on `core_streaming_performance` (separate source needed) |
 | Viewers | `COUNT(DISTINCT cust_id) WHERE if_watch = 1` |
 
 ---
@@ -287,7 +289,6 @@ JOIN core_streaming_performance csp
 ## Open questions (probe before locking SQL)
 
 1. **Donation composition** — `Donation = tip + box + wheel?` or just tip? Default: include all three.
-2. **`fact_live_bet.follow_type` values** — which string identifies the Follow System category.
-3. **World Cup filter** — exact `League` / `LeagueGroup` string for FIFA World Cup 2026.
-4. **`is_lic` meaning** — logged-in customer? filter or ignore?
-5. **`csp ↔ match_info` join key** — is there a direct `SabaMatchId` on `core_streaming_performance`, or must we join via `(league_or_tag, stream_start_time near KickOffTime)`?
+2. **World Cup filter** — exact `League` string (likely `'WORLD CUP'`); confirm via probe.
+3. **`is_lic` meaning** — logged-in customer? Current filter keeps `is_lic = 1`.
+4. **Match-stage date fit** — verify distinct kickoff dates match the 7-stage map (group / R32 / R16 / QF / SF / 3rd_place / final).

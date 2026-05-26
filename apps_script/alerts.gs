@@ -2,20 +2,23 @@
  * Streamer Performance Dashboard — Alert + Daily Digest Layer
  *
  * Two surfaces in Slack:
- *   1. Daily digest at 08:00 Taipei (always sent) — KPI snapshot, top
- *      streamers, top matches, alert count summary.
+ *   1. Daily digest at ~15:00 Taipei (always sent — 13:00 batch + 2h buffer) —
+ *      KPI snapshot, top streamers, top matches, alert count summary.
  *   2. Threshold + anomaly alerts (only when triggered) — threaded
  *      under the digest message for that day; high-severity gets its
  *      own channel ping.
  *
  * Setup:
- *   1. Open the Sheet connected to BQ.
+ *   1. Open the Sheet connected to BQ (one tab per nf-muses.worldcup.* table).
  *   2. Extensions → Apps Script → paste this file.
  *   3. Project Settings → Script Properties → add:
  *        SLACK_WEBHOOK_URL  = https://hooks.slack.com/services/...
  *        SLACK_HIGH_MENTION = <!channel>   (or <!subteam^TEAMID>, or blank)
- *        REPORT_CURRENCY    = RM           (label shown in digest)
- *   4. Triggers (clock icon) → add daily trigger on `runDaily` at 08:00 Taipei.
+ *   4. Triggers (clock icon) → add daily trigger on `runDaily` at 15:00 Taipei.
+ *
+ * Currency convention (worldcup dashboard):
+ *   • Turnover columns (*_turnover_rm) are RM — formatted with the 'rm' fmt.
+ *   • Donation / tip / box / wheel amounts (*_usd) are USD — formatted with 'usd'.
  */
 
 const CONFIG = {
@@ -25,28 +28,29 @@ const CONFIG = {
   LOG_TAB: 'Alert Log',
   TIMEZONE: 'Asia/Taipei',
 
-  // The 6 KPIs we alert on. Order = how they appear in the digest.
+  // The 6 [ALERT] KPIs (per revised metrics tree). Order = how they appear in the digest.
   KPIS: [
-    { col: 'follow_streamer_bet_count',          label: 'Follow Streamer Bet Count',         fmt: 'int' },
-    { col: 'follow_streamer_bet_turnover_usd',   label: 'Follow Streamer Bet Turnover',      fmt: 'money' },
-    { col: 'bdw_bet_count',                      label: 'Bet During Watch Count',            fmt: 'int' },
-    { col: 'bdw_turnover_usd',                   label: 'Bet During Watch Turnover',         fmt: 'money' },
-    { col: 'tip_amount_usd',                     label: 'Tip Amount',                        fmt: 'money' },
-    { col: 'tip_count',                          label: 'Tip Count',                         fmt: 'int' },
+    { col: 'follow_streamer_bet_count',        label: 'Follow Streamer Bet Count (NS)',    fmt: 'int' },
+    { col: 'bdw_turnover_rm',                  label: 'Bet During Watch Turnover (NS)',    fmt: 'rm'  },
+    { col: 'donation_amount_usd',              label: 'Donation Amount (NS)',              fmt: 'usd' },
+    { col: 'follow_streamer_bet_turnover_rm',  label: 'Follow Streamer Bet Turnover (L1)', fmt: 'rm'  },
+    { col: 'donation_user_count',              label: 'Donation User Count (L1)',          fmt: 'int' },
+    { col: 'bdw_bet_count',                    label: 'Bet During Watch Count (L2)',       fmt: 'int' },
   ],
 
   // Min-volume gate (per session)
   MIN_VIEWERS: 100,
   MIN_BETS: 10,
 
-  // Drop thresholds vs rolling-5 median; severity tiers
+  // Drop thresholds vs rolling-5 median; severity tiers.
+  // Donation Amount uses the looser tier (it's noisier than bet counts).
   THRESHOLDS: {
     follow_streamer_bet_count:        { medium: -0.30, high: -0.50 },
-    follow_streamer_bet_turnover_usd: { medium: -0.30, high: -0.50 },
+    bdw_turnover_rm:                  { medium: -0.30, high: -0.50 },
+    donation_amount_usd:              { medium: -0.40, high: -0.60 },
+    follow_streamer_bet_turnover_rm:  { medium: -0.30, high: -0.50 },
+    donation_user_count:              { medium: -0.30, high: -0.50 },
     bdw_bet_count:                    { medium: -0.30, high: -0.50 },
-    bdw_turnover_usd:                 { medium: -0.30, high: -0.50 },
-    tip_amount_usd:                   { medium: -0.40, high: -0.60 },
-    tip_count:                        { medium: -0.40, high: -0.60 },
   },
 
   // Anomaly: outside median ± k·MAD
@@ -64,7 +68,7 @@ const CONFIG = {
 // Entry points
 // ============================================================
 
-/** Daily trigger — runs once per day at 08:00 Taipei. */
+/** Daily trigger — runs once per day at ~15:00 Taipei (13:00 batch + 2h buffer). */
 function runDaily() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const yesterday = yesterdayInTz_(CONFIG.TIMEZONE);
@@ -126,17 +130,17 @@ function buildDigest_(sessions, yesterday, alerts) {
   });
 
   // Top 3 streamers by NS Follow Streamer Bet Count
-  const byStreamer = groupAndSum_(yest, 'streamer_id', ['follow_streamer_bet_count', 'follow_streamer_bet_turnover_usd', 'tip_amount_usd']);
+  const byStreamer = groupAndSum_(yest, 'streamer_id', ['follow_streamer_bet_count', 'follow_streamer_bet_turnover_rm', 'donation_amount_usd']);
   byStreamer.sort(function(a, b) { return b.follow_streamer_bet_count - a.follow_streamer_bet_count; });
   const topStreamers = byStreamer.slice(0, 3).map(function(s, i) {
     const r = yest.find(function(x) { return x.streamer_id === s.streamer_id; }) || {};
     return '  ' + (i + 1) + '. ' + (r.streamer_name || s.streamer_id) +
            ' — ' + (s.follow_streamer_bet_count || 0) + ' follow bets, ' +
-           formatVal_(s.tip_amount_usd, 'money') + ' tips';
+           formatVal_(s.donation_amount_usd, 'usd') + ' donations';
   });
 
   // Top 3 matches by NS Follow Streamer Bet Count
-  const byMatch = groupAndSum_(yest, 'SabaMatchId', ['follow_streamer_bet_count', 'bdw_turnover_usd']);
+  const byMatch = groupAndSum_(yest, 'SabaMatchId', ['follow_streamer_bet_count', 'bdw_turnover_rm']);
   byMatch.sort(function(a, b) { return b.follow_streamer_bet_count - a.follow_streamer_bet_count; });
   const topMatches = byMatch.slice(0, 3).map(function(m, i) {
     const r = yest.find(function(x) { return x.SabaMatchId === m.SabaMatchId; }) || {};
@@ -445,10 +449,10 @@ function formatDate_(v) {
 
 function formatVal_(v, fmt) {
   if (v == null || v === '') return '—';
-  if (fmt === 'money') {
-    const ccy = PropertiesService.getScriptProperties().getProperty('REPORT_CURRENCY') || 'USD';
-    return ccy + ' ' + Math.round(Number(v)).toLocaleString();
-  }
+  if (fmt === 'rm')  return 'RM '  + Math.round(Number(v)).toLocaleString();
+  if (fmt === 'usd') return 'USD ' + Math.round(Number(v)).toLocaleString();
+  // Back-compat: 'money' falls through to USD.
+  if (fmt === 'money') return 'USD ' + Math.round(Number(v)).toLocaleString();
   if (fmt === 'int') return Math.round(Number(v)).toLocaleString();
   return String(v);
 }

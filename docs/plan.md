@@ -21,8 +21,7 @@ Alerts: Slack webhook + in-sheet conditional formatting.
 NORTH STAR
 ├── Follow Streamer Bet Count     ← bets in the Follow-Streamer category     [ALERT]
 ├── Bet During Watch — Turnover   ← RM                                       [ALERT]
-└── Donation Amount (incl. Tips)  ← USD,Tips roll up into Donation total     [ALERT]
-
+└── Donation Amount (incl. Tips)  ← USD, Tips roll up into Donation total    [ALERT]
 
 L1 — DRIVERS
 ├── Recommend Bet Count           ← streamer's recommend bet
@@ -30,27 +29,27 @@ L1 — DRIVERS
 ├── Follow User Count             ← unique users placing follow-streamer bets
 ├── Donation User Count                                                      [ALERT]
 ├── Donation Count
-├── Tip Amount                    ← USD, subset of Donation (broken out)       
-├── Tip Count                     
-├── Wheel Amount                  ← USD, subset of Donation (broken out)         
-├── Wheel Count                                                               
-├── Box Amount                    ← USD, subset of Donation (broken out)         
-├── Box Count                                                                
+├── Tip Amount                    ← USD, subset of Donation (broken out)
+├── Tip Count
+├── Wheel Amount                  ← USD, subset of Donation (broken out)
+├── Wheel Count
+├── Box Amount                    ← USD, subset of Donation (broken out)
+├── Box Count
 └── Stream Count                  ← # live sessions in period, streamer+stream id = 1 count
 
 L2 — DECOMPOSITION
-├── Bet Turnover by category (same 4)
+├── Bet Turnover by category (Self / Follow User / Follow Streamer)
 ├── Bet During Watch — Count                                                 [ALERT]
 └── Watch Time (total + avg per viewer + PCU)
 ```
 
 **The 6 [ALERT] KPIs are the alertable surface:**
 1. Follow Streamer Bet Count (NS)
-2. Follow Streamer Bet Turnover (L1)
-3. Tip Amount (NS)
-4. Tip Count (L1)
-5. Bet During Watch Count (L2)
-6. Bet During Watch Turnover (NS)
+2. Bet During Watch — Turnover (NS)
+3. Donation Amount (NS)
+4. Follow Streamer Bet Turnover (L1)
+5. Donation User Count (L1)
+6. Bet During Watch — Count (L2)
 
 Each is evaluated daily per stream session against rolling-5-median baseline + min-volume gate. Daily Slack digest summarizes overall performance so the dashboard doesn't need to be opened every morning.
 
@@ -65,15 +64,14 @@ Each is evaluated daily per stream session against rolling-5-median baseline + m
 
 ## World Cup Context & Match Tagging
 
-June 12–July 20 is worldcup tournament — comparability is easier, but variance comes from team popularity and stage. 
+June 12 – July 20 is the World Cup tournament — comparability is easier, but variance comes from team popularity and stage.
 
-Original dim table : nf-bifrost.LiveStreaming.match_info 
-Schemas: Month \	kickoffday\	timehour \	KickOffTime	\ Item \	League	\Team	\country	\Streamer	\SabaMatchId	\AnchorId	\Shared	\InfoSiteMatchId	\CloseTime	\LeagueId	\LeagueGroup	\LeagueCnName	\HomeCnName	\AwayCnName\	Supplier	\IsSelfOwned	\isCancelled
+Original dim table: `nf-bifrost.LiveStreaming.match_info` — columns: Month, kickoffday, timehour, KickOffTime, Item, League, Team, country, Streamer, SabaMatchId, AnchorId, Shared, InfoSiteMatchId, CloseTime, LeagueId, LeagueGroup, LeagueCnName, HomeCnName, AwayCnName, Supplier, IsSelfOwned, isCancelled.
 
-->Tag matches in `dim_match`:
+Tag matches in `dim_match`:
 
-- `match_stage` — group(6/11-6/28) / R32(6/29-7/4) / R16(7/5-7/8) / QF(7/1-7/12) / SF(7/15-7/16) / Third place play-off (7/19) / final(7/20)
-- `time_slot_taipei` — late-night / morning / afternoon (derived from kickoff)
+- `match_stage` — group (6/11–6/28) / R32 (6/29–7/4) / R16 (7/5–7/8) / QF (7/10–7/12) / SF (7/15–7/16) / 3rd_place (7/19) / final (7/20)
+- `time_slot_taipei` — late_night / morning / afternoon (derived from kickoff)
 - `day_of_week`
 
 ---
@@ -82,15 +80,15 @@ Schemas: Month \	kickoffday\	timehour \	KickOffTime	\ Item \	League	\Team	\count
 
 ### 1. Match-by-match (per session)
 - Each row = one live session (stream_id, streamer_id, match_id)
-- Compare current vs **rolling median of the last 3 matches** when match_stage = group
-  + Compare current vs **rolling median of the last 3 matches** when match_stage = R32, R16
-  + Compare current vs **rolling median of the last match ** when match_stage = QF, SF, Third place play-off, final
-  + final compare to avg AVG all matches in the season
-- Display: current, rolling median, delta %, sparkline
-- **Sample-size guard:** <3 prior matches → show "n/a"
+- Baseline depends on `match_stage`:
+  - `group`, `R32`, `R16` → rolling median of the last **3** matches
+  - `QF`, `SF`, `3rd_place`, `final` → rolling median of the last **1** match
+  - `final` additionally compared to the season **average** across all matches
+- Display: current, baseline, delta %, sparkline
+- **Sample-size guard:** `<3` prior matches → show "n/a" (only applies where baseline = 3)
 
 ### 2. Week (ISO Mon–Sun)
-- Current week vs rolling acummulated week avg ( week 2 vs week 1, week 3 vs avg week1+2, ...)
+- Current week vs **cumulative-prior-weeks average** (week N vs avg of weeks 1…N-1)
 - WoW % change
 - Top 5 streamers + top 5 matches by NS
 
@@ -105,14 +103,15 @@ Schemas: Month \	kickoffday\	timehour \	KickOffTime	\ Item \	League	\Team	\count
 - Our bet count / Platform bet count  on that match = **match share of bets**
 - Our avg bet size vs platform avg bet size
 - Rolls up by streamer / week / month
+- Platform side restricted to sites with streamer function
 
-**Scope B — Season-window aggregate (per session window):**
-- Our bet turnover during the season / Platform total bet turnover during season 
-- Tests whether our streams move overall platform activity, not just the covered match
+**Scope B — Season-window aggregate (full World Cup):**
+- Our bet turnover across the full season / Platform total bet turnover across the full season = **season share**
+- Tests whether our streams move overall platform activity, not just the covered matches
 
 Definitions:
 - Our product bet = Bet During Watch (watch + bet timestamps overlap)
-- Platform bet = all bets on platform (Scope A: same match, with sites having streamer function; Scope B: whole season)
+- Platform bet = all bets on platform (Scope A: same match, sites with streamer function; Scope B: whole season)
 - Both sides: exclude voided
 
 ---
@@ -134,7 +133,7 @@ Definitions:
 
 | Table | Use |
 |---|---|
-| `nf-bifrost.LiveStreaming.match_info` | dim_match — has `SabaMatchId`, `KickOffTime`, 'kickoffday', `League`, `Team`, `Shared`, `isCancelled`, `country`,	`Streamer`, `AnchorId`. **No stage column** — needs manual tagging for group/R16/QF/SF/final. |
+| `nf-bifrost.LiveStreaming.match_info` | dim_match — has `SabaMatchId`, `KickOffTime`, `kickoffday`, `League`, `Team`, `Shared`, `isCancelled`, `country`, `Streamer`, `AnchorId`. **No stage column** — derived from kickoff date per the 7-stage map (group / R32 / R16 / QF / SF / 3rd_place / final). |
 | `nf-bifrost.LiveStreaming.chatroom_anchor` | dim_streamer — `Id` (= anchor_id), `Name`, `Provider` (= Supplier), `Language`, `Status`. |
 | `nf-bifrost.VN_CTS_Data.CTSCustomer` | User attrs if needed. Join key is `CustID` (capital). `CreatedDate` is UTC-4 → convert with `DATETIME(TIMESTAMP(CreatedDate,'UTC-4'),'Asia/Taipei')`. Dedup with `QUALIFY ROW_NUMBER() OVER (PARTITION BY CustID ORDER BY ModifiedTime DESC) = 1`. |
 
@@ -142,36 +141,37 @@ Definitions:
 
 ```
 NS Follow Streamer Bet Count        = SUM(follow_bet_count)
-NS Donation Amount (incl. Tips)     = {SUM(tip_amount_rm) + SUM(box_amount_rm) + SUM(wheel_amount_rm)}/4.2 
-NS Bet During Watch — Turnover      = SUM(during_watch_member_to)
+NS Bet During Watch — Turnover (RM) = SUM(during_watch_member_to)               -- raw RM, no /4.2
+NS Donation Amount (USD)            = (SUM(tip_amount_rm)+SUM(box_amount_rm)+SUM(wheel_amount_rm)) / 4.2
 L1 Recommend Bet Count              = SUM(chatroom_recommend.RecommendCount)  on SabaMatchId × AnchorId
-L1 Follow Streamer Bet Turnover     = SUM(follow_member_to)
+L1 Follow Streamer Bet Turnover(RM) = SUM(follow_member_to)                     -- raw RM
 L1 Follow User Count                = COUNT(DISTINCT cust_id) WHERE follow_bet_count > 0
 L1 Donation User Count              = COUNT(DISTINCT cust_id) WHERE if_tip|if_box|if_wheel = 1
-L1 Tip Amount                       = SUM(tip_amount_rm)
-L1 Tip Count                        = SUM(tip_count)
-L1 Tip User Count                   = COUNT(DISTINCT cust_id) WHERE if_tip = 1
-L1 Stream Count                     = COUNT(DISTINCT stream_id) at streamer × period grain
-L2 Follow Streamer (bet)            = SUM(follow_bet_count), SUM(follow_member_to)
+L1 Donation Count                   = SUM(tip_count) + SUM(box_count) + SUM(wheel_count)
+L1 Tip / Box / Wheel Amount (USD)   = SUM(*_amount_rm) / 4.2  (one per channel)
+L1 Tip / Box / Wheel Count          = SUM(tip_count) / SUM(box_count) / SUM(wheel_count)
+L1 Stream Count                     = COUNT(DISTINCT CONCAT(anchor_id,'-',stream_id)) at streamer × period grain
+L2 Bet Turnover (Follow Streamer / Follow User / Self) — Self = total − the other two; no Follow System.
 L2 Bet During Watch — Count         = SUM(during_watch_bet_count)
 L2 Bet During Watch — User          = COUNT(DISTINCT cust_id) WHERE during_watch_bet_count > 0
-L2 Bet During Watch — Bet size      = SUM(during_watch_member_to)/SUM(during_watch_bet_count)
-L2 Watch Time total                 = SUM(watch_sec)/60
-L2 Watch Time per viewer            = (SUM(watch_sec)/60) / COUNT(DISTINCT cust_id WHERE if_watch = 1)
+L2 Bet During Watch — Avg bet size  = SUM(during_watch_member_to) / SUM(during_watch_bet_count)
+L2 Watch Time total (min)           = SUM(watch_sec) / 60
+L2 Watch Time per viewer (min)      = (SUM(watch_sec)/60) / COUNT(DISTINCT cust_id WHERE if_watch = 1)
 Viewers                             = COUNT(DISTINCT cust_id WHERE if_watch = 1)
-Viewers over 10mins                 = COUNT(DISTINCT cust_id WHERE if_watch = 1) AND SUM(watch_sec)/60 >= 10min
+Viewers over 10 min                 = COUNT(DISTINCT cust_id WHERE if_watch=1 AND watch_sec >= 600)
+PCU (peak concurrent users)         = MAX(call_pcu) from nf-bifrost.livestream_dm.mart_comprehensive_metrics
 ```
 
 ### Filters
 - `is_cancelled = FALSE` (exclude cancelled streams)
-- World Cup filter: `match_info.League` matching "WORLD CUP" (exact value TBD — needs distinct-value probe)
+- World Cup filter: `match_info.League LIKE '%WORLD CUP%'` (exact value to be confirmed via Phase 0 probe)
 - For "Bet During Watch" we don't need to recompute the overlap — the `during_watch_*` columns and `is_during_watch` flag are pre-computed
 
 ### Open data questions (small, can be resolved in one probe each)
-1. **Donation composition** — does "Donation" = tip + box + wheel? Default: include all three.
-2. **World Cup filter value** — exact string in `match_info.League` : WORLD CUP
-3. **Match stage** — needs manual mapping or derive from match date + bracket structure.
-4. **`is_lic` column** — meaning? (suspect "logged-in customer"). is_lic =1 or site group = Licensee
+1. **Donation composition** — does "Donation" = tip only, or tip + box + wheel? Default: include all three.
+2. **World Cup filter value** — exact string in `match_info.League` (likely `WORLD CUP`).
+3. **Match stage** — verify kickoff dates fit the 7-stage map.
+4. **`is_lic` column** — meaning? (suspect "logged-in customer"). Current filter keeps `is_lic = 1`.
 
 ---
 
@@ -198,65 +198,42 @@ Path: `/home/user/Claude/.claude/skills/bq-schemas/SKILL.md`.
 
 ## SQL Files to Rewrite
 
-Replace `__RAW_*__` placeholders in all `sql/agg_*.sql` files with the real table names. Major shape change: **`core_streaming_performance` already does the per-cust × per-stream aggregation**, so:
+All `agg_*` and `dim_*` SQL writes to `nf-muses.worldcup.*`. Currency convention: turnover RM, amounts USD. No Follow System category in this dashboard.
 
-- `agg_session_metrics.sql` collapses to: `GROUP BY stream_id` on core_streaming_performance + JOIN chatroom_recommend + JOIN match_info — no need to recompute Bet During Watch or 4-category bets from raw bets (mostly).
-- `agg_match_platform_compare.sql` still needs `fact_live_bet` for Scope A (platform totals per match) and Scope B (platform totals per session time window).
-- `dim_match.sql` rebuilt against `match_info`, with manual `match_stage` mapping (TODO: lookup table for the 64 World Cup fixtures).
-- `dim_streamer.sql` rebuilt against `chatroom_anchor`, with `tier` derived from streamer history in `core_streaming_performance`.
+- `agg_session_metrics.sql` — `GROUP BY stream_id` on `core_streaming_performance` + JOIN `chatroom_recommend` + JOIN `match_info`. Self bet = total − follow_streamer − follow_user. Adds `donation_count`, PCU placeholder.
+- `agg_streamer_weekly.sql` — reads `agg_session_metrics`; cumulative-prior-weeks avg replaces 4-week rolling median.
+- `agg_streamer_monthly.sql` — reads `agg_session_metrics`; June vs July only with `vs_june` delta.
+- `agg_match_platform_compare.sql` — Scope A per match + Scope B season-window aggregate. Platform side TODO: restrict to sites with streamer function.
+- `dim_match.sql` — built from `match_info`; `match_stage` derived from kickoff date per 7-stage map; no `team_popularity_tier`.
+- `dim_streamer.sql` — built from `chatroom_anchor`; `tier` derived from streamer history.
 
 ---
 
 ## Phase 0 — BQ Discovery (now: small targeted probes only)
 
-Schemas are known; only 4 distinct-value probes needed:
+Schemas are known. Four probes remain (see `sql/phase0_discovery.sql`):
 
-```sql
--- 1. Confirm Donation composition columns present + ranges
-SELECT
-  COUNTIF(if_tip=1) AS sessions_with_tip,
-  COUNTIF(if_box=1) AS sessions_with_box,
-  COUNTIF(wheel_count>0) AS sessions_with_wheel,
-  SUM(tip_amount_rm) AS total_tip_rm,
-  SUM(box_amount_rm) AS total_box_rm,
-  SUM(wheel_amount_rm) AS total_wheel_rm
-FROM `nf-bifrost.livestream_dm.core_streaming_performance`
-WHERE stream_start_date BETWEEN '2026-05-01' AND '2026-05-22';
+1. **Donation composition** — confirm tip + box + wheel populated; default include all three.
+2. **World Cup filter** — distinct `League` / `LeagueGroup` strings for fixtures ≥ 2026-06-01; expected `WORLD CUP`.
+3. **`is_lic` meaning + `status_id` settled vs voided** — confirms filter assumptions.
+4. **Match-stage date fit** — distinct kickoff dates for World Cup fixtures must match the 7-stage map (group 6/11–6/28, R32 6/29–7/4, R16 7/5–7/8, QF 7/10–7/12, SF 7/15–7/16, 3rd_place 7/19, final 7/20).
 
--- 2. fact_live_bet.follow_type distinct values (to identify "Follow System")
-SELECT follow_type, COUNT(*) n FROM `nf-bifrost.livestream_dm.fact_live_bet`
-WHERE trans_dt >= '2026-05-01'
-GROUP BY follow_type ORDER BY n DESC;
-
--- 3. match_info — find the World Cup string
-SELECT DISTINCT League, LeagueGroup, LeagueCnName, COUNT(*) n
-FROM `nf-bifrost.LiveStreaming.match_info`
-WHERE KickOffTime >= '2026-06-01'
-GROUP BY 1,2,3 ORDER BY n DESC LIMIT 50;
-
--- 4. is_lic meaning — sample
-SELECT is_lic, COUNT(*) n
-FROM `nf-bifrost.livestream_dm.core_streaming_performance`
-WHERE stream_start_date >= '2026-05-01'
-GROUP BY 1;
-```
-
-After these 4 probes, all `__RAW_*__` placeholders can be filled and SQL is final.
+After these probes, the remaining TODOs in the SQL files can be locked.
 
 ---
 
 ## Phase 1 — Dataset Design
 
-Materialized BQ tables in a dedicated reporting dataset, written by scheduled query.
+Materialized BQ tables in `nf-muses.worldcup`, written by scheduled query.
 
 | Table | Grain | Contents |
 |---|---|---|
 | `agg_session_metrics` | one row per stream session | All NS + L1 + L2 for that session; joined to dim_match |
-| `agg_streamer_weekly` | streamer × ISO week | Weekly totals, 4-week rolling median, WoW % |
-| `agg_streamer_monthly` | streamer × month | Monthly totals, MoM % |
-| `agg_match_platform_compare` | match_id | Our + platform metrics, share % for Scope A & B |
-| `dim_match` | match_id | kickoff_ts, teams, stage, popularity_tier, time_slot, day_of_week |
-| `dim_streamer` | streamer_id | name, tier (rookie/regular/top), join_date |
+| `agg_streamer_weekly` | streamer × ISO week | Weekly totals, cumulative-prior-weeks avg, WoW % |
+| `agg_streamer_monthly` | streamer × month (June/July) | Monthly totals + vs-June delta |
+| `agg_match_platform_compare` | match_id | Our + platform metrics, share % for Scope A; season-window scalars for Scope B |
+| `dim_match` | match_id | kickoff_ts, teams, stage, time_slot, day_of_week |
+| `dim_streamer` | streamer_id | name, supplier, tier (rookie/regular/top) |
 
 Each `agg_*` table includes `as_of_date` so reruns are idempotent (insert-overwrite by date partition).
 
@@ -267,7 +244,7 @@ Each `agg_*` table includes `as_of_date` so reruns are idempotent (insert-overwr
 ```
 [BigQuery raw tables]
         ↓
-[BQ Scheduled Query — daily 06:00 Taipei]
+[BQ Scheduled Query — daily 13:00 Taipei]
    • Rebuilds agg_session_metrics, agg_streamer_weekly,
      agg_streamer_monthly, agg_match_platform_compare
    • Insert-overwrite by as_of_date partition (idempotent backfill)
@@ -290,21 +267,21 @@ Each `agg_*` table includes `as_of_date` so reruns are idempotent (insert-overwr
 ## Phase 3 — Dashboard Layout (Looker Studio)
 
 **Tab 1 — Session view**
-- Filters: date range, streamer, match stage, popularity tier
-- Table: row per session; NS + key L1 columns; rolling-5 median delta column; sparkline
+- Filters: date range, streamer, match stage
+- Table: row per session; NS + key L1 columns; stage-adaptive baseline delta column; sparkline
 - Drill-down: full L2 breakdown card on row click
 
 **Tab 2 — Streamer weekly + monthly**
 - Toggle weekly/monthly
-- This-period NS totals + period-over-period delta
+- This-period NS totals + period-over-period delta (week = cumulative-prior-weeks avg; month = vs June)
 - Top 10 streamer leaderboard (tier-filterable)
 - Top match leaderboard
-- 6-period trend line
+- Season trend line
 
 **Tab 3 — Platform comparison**
 - Match-share scoreboard (Scope A): our % per match
-- Time-window-share stacked bar (Scope B): our vs platform per session window
-- Filters: stage, popularity tier, streamer
+- Season-share scorecard (Scope B): our vs platform across full World Cup
+- Filters: stage, streamer
 
 **Tab 4 — Alert log**
 - Columns: date, metric, streamer/match, type (threshold/anomaly), severity, value, expected, acknowledged
@@ -316,19 +293,19 @@ Each `agg_*` table includes `as_of_date` so reruns are idempotent (insert-overwr
 
 Two complementary Slack surfaces so Clara never needs to open the dashboard:
 
-### 4a. Daily digest (always sent, 08:00 Taipei)
+### 4a. Daily digest (always sent, ~15:00 Taipei)
 
 ```
 📊 World Cup Dashboard — <date>
 <N> streams · <N> streamers · <N> matches
 
 KPI snapshot (yesterday vs rolling-5 median):
-  Follow Streamer Bet Count       <total>   ▲/▼ <%>
-  Follow Streamer Bet Turnover    <total>   ▲/▼ <%>
-  Bet During Watch Count          <total>   ▲/▼ <%>
-  Bet During Watch Turnover       <total>   ▲/▼ <%>
-  Tip Amount (RM)                 <total>   ▲/▼ <%>
-  Tip Count                       <total>   ▲/▼ <%>
+  Follow Streamer Bet Count (NS)       <total>   ▲/▼ <%>
+  Bet During Watch Turnover (NS, RM)   <total>   ▲/▼ <%>
+  Donation Amount (NS, USD)            <total>   ▲/▼ <%>
+  Follow Streamer Bet Turnover (L1,RM) <total>   ▲/▼ <%>
+  Donation User Count (L1)             <total>   ▲/▼ <%>
+  Bet During Watch Count (L2)          <total>   ▲/▼ <%>
 
 ⚽ Top 1 match + streamer highest Follow bet count
 ⚽ Top 1 match + streamer highest BdW turnover
@@ -338,7 +315,7 @@ KPI snapshot (yesterday vs rolling-5 median):
 ⚠️ <N> alerts overnight — see thread
 ```
 
-Implementation in `apps_script/alerts.gs` → `runDaily()`; scheduled at 08:00 Taipei (post-batch + 2h buffer).
+Implementation in `apps_script/alerts.gs` → `runDaily()`; scheduled at ~15:00 Taipei (13:00 batch + 2h buffer).
 
 ### 4b. Threshold + anomaly alerts (triggered)
 
@@ -348,14 +325,14 @@ Implementation in `apps_script/alerts.gs` → `runDaily()`; scheduled at 08:00 T
 
 | KPI | Medium | High |
 |---|---|---|
-| Follow Streamer Bet Count | ≤ −30% | ≤ −50% |
-| Follow Streamer Bet Turnover | ≤ −30% | ≤ −50% |
-| Bet During Watch Count | ≤ −30% | ≤ −50% |
-| Bet During Watch Turnover | ≤ −30% | ≤ −50% |
-| Donation Amount | ≤ −40% | ≤ −60% |
-| Donation Count | ≤ −40% | ≤ −60% |
+| Follow Streamer Bet Count (NS) | ≤ −30% | ≤ −50% |
+| Bet During Watch Turnover (NS, RM) | ≤ −30% | ≤ −50% |
+| Donation Amount (NS, USD) | ≤ −40% | ≤ −60% |
+| Follow Streamer Bet Turnover (L1, RM) | ≤ −30% | ≤ −50% |
+| Donation User Count (L1) | ≤ −30% | ≤ −50% |
+| Bet During Watch Count (L2) | ≤ −30% | ≤ −50% |
 
-**Weekly:** weekly stream count drops >20% vs rolling-4-week median.
+**Weekly:** weekly stream count drops >20% vs cumulative-prior-weeks average.
 **Anomaly:** any of the 6 KPIs outside rolling-5 median ± 2 × MAD → medium.
 **Streamer absent:** streamer with ≥1 stream in last 3 days didn't stream yesterday → low.
 
@@ -371,13 +348,13 @@ Implementation in `apps_script/alerts.gs` → `runDaily()`; scheduled at 08:00 T
 
 **Platform side:** all non-voided bets from `fact_live_bet` (no stream filter). `status_id` filter TBD via Phase 0 probe.
 
-**Currency:** report in **USD**. Chatroom MYR amounts converted via `/ 4.2` (per `bq-filter-rules` skill). Jioo is already USD when `currency_id = 998`.
+**Currency (worldcup dashboard):** turnover in **RM** (raw `member_to` family); donation / tip / box / wheel in **USD** (MYR / 4.2). See `bq-filter-rules` skill for the override note.
 
-**Scope A (per match)** — `our / platform` on the same `SabaMatchId`. Answers: "Did our streams capture more of this match?"
+**Scope A (per match)** — `our / platform` on the same `SabaMatchId`, platform side restricted to sites with streamer function. Answers: "Did our streams capture more of this match?"
 
-**Scope B (per stream window)** — `our_during_watch / platform_in_window`. Answers: "Did our streamers move overall platform betting during their broadcast?"
+**Scope B (season-window aggregate)** — `our_season / platform_season` across the full World Cup window (2026-06-11 → 2026-07-20). Single scalar. Answers: "Did our streamers move overall platform betting across the tournament?"
 
-Both scopes roll up to streamer / week / month via `dim_streamer`.
+Scope A rolls up to streamer / week / month via `dim_streamer`. Scope B is a season-level scorecard.
 
 ---
 
@@ -386,16 +363,16 @@ Both scopes roll up to streamer / week / month via `dim_streamer`.
 1. **Per-viewer normalization.** A drop in raw Tip Amount can be (a) fewer viewers or (b) same viewers tipping less — different fixes. Track raw + per-viewer side-by-side.
 2. **Stream-length normalization.** 30-min vs 3-hour streams produce wildly different absolutes. Per-hour rates fix this.
 3. **Bet status filter.** `fact_live_bet.status_id` includes pending/voided — confirm settled values via probe before using `member_to`.
-4. **Currency mismatch.** `tip_amount_rm` (RM) vs `member_to` (site currency). Pick reporting currency once and convert.
+4. **Mixed-currency reporting (intentional).** Turnover stays RM (`*_turnover_rm`); donation/tip/box/wheel convert to USD (`*_usd`). Make sure the digest and dashboard label each metric with its unit so RM and USD aren't compared directly.
 5. **Mean reversion.** After a hot streak, "back to normal" looks like a drop. Pair relative threshold with an absolute floor.
 6. **Tier-aware thresholds.** Rookies are noisier than top streamers. Consider looser thresholds (or skip anomaly alerts) for `dim_streamer.tier = 'rookie'`.
-7. **Match-tier mixing.** Brazil match vs minor-team match in a rolling median is apples-to-oranges. Include `team_popularity_tier` in alert context so reviewers can dismiss false positives.
-8. **Late-settling bets.** Bets settle after match ends. The 06:00 batch may miss recent settlements — schedule a 24h-rerun for the prior-prior day.
+7. **Match mixing.** Brazil match vs minor-team match in a rolling median is apples-to-oranges. The stage-adaptive baseline (group/R32/R16 use 3 priors; QF+ use 1 prior) partly addresses this; surface match label in the alert context so reviewers can dismiss false positives.
+8. **Late-settling bets.** Bets settle after match ends. The 13:00 batch should catch most overnight settlements; if needed, schedule a 24h-rerun for the prior-prior day.
 9. **Slack noise budget.** 50 streamers × 6 KPIs = many candidates. Cap via digest model + tier filter + dedup (one streamer × metric × day max).
 10. **Streamer absence.** If a streamer skips a day, the rolling-5 doesn't shift — they look "fine" with zero data. The `absent` alert (≥1 stream in last 3d + 0 yesterday) catches this.
 11. **Min-volume gate edge.** 99 viewers = suppressed. Start at 100 viewers + 10 bets; tune after week 1.
 12. **World Cup format change.** Group stage = 4 matches/day; knockout = 1–2/day. WoW comparison across the boundary is misleading — flag the transition date in the digest.
-13. **Digest delivery timing.** 08:00 Taipei = 06:00 batch + 2h buffer. If batches sometimes run late, gate the digest on a "data complete" sentinel cell.
+13. **Digest delivery timing.** ~15:00 Taipei = 13:00 batch + 2h buffer. If batches sometimes run late, gate the digest on a "data complete" sentinel cell.
 14. **Holiday calendars.** Local holidays change viewing patterns. Add a `holidays` lookup or annotate the digest.
 
 ---
@@ -404,7 +381,7 @@ Both scopes roll up to streamer / week / month via `dim_streamer`.
 
 1. **Post-Phase-0:** review BQ schema map with Clara; confirm all NS/L1/L2 computable; close gaps before SQL.
 2. **Post-Phase-1:** hand-compute NS + L1 for one sample session via raw SQL; must match `agg_session_metrics` exactly.
-3. **Post-Phase-2:** verify daily 06:00 Taipei refresh runs 3 days straight without manual intervention; check partition idempotency by re-running a day.
+3. **Post-Phase-2:** verify daily 13:00 Taipei refresh runs 3 days straight without manual intervention; check partition idempotency by re-running a day.
 4. **Post-Phase-3:** UAT with one ops user + one manager; confirm filters, drill-downs, <5s load.
 5. **Post-Phase-4:** synthetic threshold breach (edit a metric cell); confirm Slack + in-sheet alert fire within 10 min; confirm min-volume gate suppresses correctly.
 
@@ -420,10 +397,10 @@ Three concrete deliverables, ordered:
    - `agg_match_platform_compare.sql` — keep two CTEs (Scope A vs platform per match using `fact_live_bet`; Scope B vs platform during stream window)
    - `dim_match.sql` — built from `match_info` filtered to World Cup; manual `match_stage` lookup for ~64 fixtures
    - `dim_streamer.sql` — built from `chatroom_anchor`; tier derived from history in `core_streaming_performance`
-3. **Run the 4 discovery probes** (above) to confirm:
+3. **Run the 4 discovery probes** (`sql/phase0_discovery.sql`) to confirm:
    - Donation composition (tip + box + wheel?)
-   - `fact_live_bet.follow_type` distinct values
-   - World Cup filter string in `match_info.League` / `LeagueGroup`
-   - `is_lic` meaning
+   - World Cup filter string in `match_info.League` (likely `WORLD CUP`)
+   - `is_lic` meaning + `status_id` settled values
+   - Match-stage date fit (verify kickoffs match the 7-stage map)
 
-After step 3, lock the SQL and schedule the daily 06:00 Taipei refresh.
+After step 3, lock the SQL and schedule the daily 13:00 Taipei refresh.
