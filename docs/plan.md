@@ -104,7 +104,7 @@ Tag matches in `dim_match`:
 
 ### 4. Our Product vs Platform (two scopes)
 
-**Scope A — Match-level (per match our streamers covered):**
+**Scope A — Match + site -level (per match and sites our streamers covered):**
 - Our bet turnover / Platform bet turnover on that match = **match share**
 - Our bet count / Platform bet count  on that match = **match share of bets**
 - Our avg bet size vs platform avg bet size
