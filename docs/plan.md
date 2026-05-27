@@ -21,42 +21,48 @@ Alerts: Slack webhook + in-sheet conditional formatting.
 NORTH STAR
 ├── Follow Streamer Bet Count     ← bets in the Follow-Streamer category     [ALERT]
 ├── Bet During Watch — Turnover   ← RM                                       [ALERT]
-└── Donation Amount (incl. Tips)  ← USD, Tips roll up into Donation total    [ALERT]
+└── Gift Amount (incl. Tips)  ← USD, Tips roll up into gift total    [ALERT]
 
 L1 — DRIVERS
 ├── Recommend Bet Count           ← streamer's recommend bet
-├── Follow Streamer Bet Turnover  ← RM on follow-streamer bets               [ALERT]
 ├── Follow User Count             ← unique users placing follow-streamer bets
-├── Donation User Count                                                      [ALERT]
-├── Donation Count
-├── Tip Amount                    ← USD, subset of Donation (broken out)
-├── Tip Count
-├── Wheel Amount                  ← USD, subset of Donation (broken out)
-├── Wheel Count
-├── Box Amount                    ← USD, subset of Donation (broken out)
-├── Box Count
-└── Stream Count                  ← # live sessions in period, streamer+stream id = 1 count
+├── Bet During Watch — Count                                                 [ALERT]
+├── Bet During Watch — Bet size                                              
+├── Tip user/Watch user           ← streamers' attraction                    [ALERT]                    
+├── Folow bet user/BdW user       ← streamers' recommendation influence      [ALERT]                                  
+├── Tip Amount                    ← USD, subset of gift (broken out)
+├── Wheel Amount                  ← USD, subset of gift (broken out)
+├── Box Amount                    ← USD, subset of gift (broken out)
 
 L2 — DECOMPOSITION
-├── Bet Turnover by category (Self / Follow User / Follow Streamer)
-├── Bet During Watch — Count                                                 [ALERT]
+├── Stream Count                  ← # live sessions in period, streamer+stream id = 1 count
+├── Follow Streamer Bet Turnover  ← RM on follow-streamer bets               [ALERT]
+├── Bet During Watch — User Count                                            [ALERT]
+├── Gift  Count
+      ├── Wheel Count
+      ├── Box Count
+      ├── Tip Count
+├── Gift User Count                                                          [ALERT]
+├── Viewer                                                                   [ALERT]
+├── Viewer above 10min                                                       [ALERT]
 └── Watch Time (total + avg per viewer + PCU)
 ```
 
 **The 6 [ALERT] KPIs are the alertable surface:**
 1. Follow Streamer Bet Count (NS)
 2. Bet During Watch — Turnover (NS)
-3. Donation Amount (NS)
-4. Follow Streamer Bet Turnover (L1)
-5. Donation User Count (L1)
-6. Bet During Watch — Count (L2)
+3. Gift Amount (NS)
+4. Follow Streamer Bet Turnover (L2)
+5. Gift User Count (L1)
+6. Bet During Watch — Count (L1)
+7. Viewer above 10min (L2)
 
 Each is evaluated daily per stream session against rolling-5-median baseline + min-volume gate. Daily Slack digest summarizes overall performance so the dashboard doesn't need to be opened every morning.
 
 ### Locked definitions
 - **NS "Follow Streamer Bet Count"** = Follow Streamer category only (strictest definition of stream influence). Same metric appears at L2 as decomposition.
 - **Recommend Bet Count** = streamer-recommended bets — viewer placed a bet on the streamer's recommended pick during the live session. Not system recommendations.
-- **Donation/Tip** = Tip is a subset of Donation. NS Donation Amount = full total; Tip metrics broken out at L1.
+- **gift/Tip** = Tip is a subset of gift. NS gift Amount = full total; Tip metrics broken out at L1.
 - **Bet During Watch** = bet placed by a user whose watch session overlaps the bet timestamp (same stream).
 - **Like-for-like guards:** exclude voided bets; exclude flagged bot/multi-accounts on our side.
 
@@ -142,12 +148,12 @@ Definitions:
 ```
 NS Follow Streamer Bet Count        = SUM(follow_bet_count)
 NS Bet During Watch — Turnover (RM) = SUM(during_watch_member_to)               -- raw RM, no /4.2
-NS Donation Amount (USD)            = (SUM(tip_amount_rm)+SUM(box_amount_rm)+SUM(wheel_amount_rm)) / 4.2
+NS gift Amount (USD)            = (SUM(tip_amount_rm)+SUM(box_amount_rm)+SUM(wheel_amount_rm)) / 4.2
 L1 Recommend Bet Count              = SUM(chatroom_recommend.RecommendCount)  on SabaMatchId × AnchorId
 L1 Follow Streamer Bet Turnover(RM) = SUM(follow_member_to)                     -- raw RM
 L1 Follow User Count                = COUNT(DISTINCT cust_id) WHERE follow_bet_count > 0
-L1 Donation User Count              = COUNT(DISTINCT cust_id) WHERE if_tip|if_box|if_wheel = 1
-L1 Donation Count                   = SUM(tip_count) + SUM(box_count) + SUM(wheel_count)
+L1 gift User Count              = COUNT(DISTINCT cust_id) WHERE if_tip|if_box|if_wheel = 1
+L1 gift Count                   = SUM(tip_count) + SUM(box_count) + SUM(wheel_count)
 L1 Tip / Box / Wheel Amount (USD)   = SUM(*_amount_rm) / 4.2  (one per channel)
 L1 Tip / Box / Wheel Count          = SUM(tip_count) / SUM(box_count) / SUM(wheel_count)
 L1 Stream Count                     = COUNT(DISTINCT CONCAT(anchor_id,'-',stream_id)) at streamer × period grain
@@ -168,7 +174,7 @@ PCU (peak concurrent users)         = MAX(call_pcu) from nf-bifrost.livestream_d
 - For "Bet During Watch" we don't need to recompute the overlap — the `during_watch_*` columns and `is_during_watch` flag are pre-computed
 
 ### Open data questions (small, can be resolved in one probe each)
-1. **Donation composition** — does "Donation" = tip only, or tip + box + wheel? Default: include all three.
+1. **gift composition** — does "gift" = tip only, or tip + box + wheel? Default: include all three.
 2. **World Cup filter value** — exact string in `match_info.League` (likely `WORLD CUP`).
 3. **Match stage** — verify kickoff dates fit the 7-stage map.
 4. **`is_lic` column** — meaning? (suspect "logged-in customer"). Current filter keeps `is_lic = 1`.
@@ -200,7 +206,7 @@ Path: `/home/user/Claude/.claude/skills/bq-schemas/SKILL.md`.
 
 All `agg_*` and `dim_*` SQL writes to `nf-muses.worldcup.*`. Currency convention: turnover RM, amounts USD. No Follow System category in this dashboard.
 
-- `agg_session_metrics.sql` — `GROUP BY stream_id` on `core_streaming_performance` + JOIN `chatroom_recommend` + JOIN `match_info`. Self bet = total − follow_streamer − follow_user. Adds `donation_count`, PCU placeholder.
+- `agg_session_metrics.sql` — `GROUP BY stream_id` on `core_streaming_performance` + JOIN `chatroom_recommend` + JOIN `match_info`. Self bet = total − follow_streamer − follow_user. Adds `gift_count`, PCU placeholder.
 - `agg_streamer_weekly.sql` — reads `agg_session_metrics`; cumulative-prior-weeks avg replaces 4-week rolling median.
 - `agg_streamer_monthly.sql` — reads `agg_session_metrics`; June vs July only with `vs_june` delta.
 - `agg_match_platform_compare.sql` — Scope A per match + Scope B season-window aggregate. Platform side TODO: restrict to sites with streamer function.
@@ -213,7 +219,7 @@ All `agg_*` and `dim_*` SQL writes to `nf-muses.worldcup.*`. Currency convention
 
 Schemas are known. Four probes remain (see `sql/phase0_discovery.sql`):
 
-1. **Donation composition** — confirm tip + box + wheel populated; default include all three.
+1. **gift composition** — confirm tip + box + wheel populated; default include all three.
 2. **World Cup filter** — distinct `League` / `LeagueGroup` strings for fixtures ≥ 2026-06-01; expected `WORLD CUP`.
 3. **`is_lic` meaning + `status_id` settled vs voided** — confirms filter assumptions.
 4. **Match-stage date fit** — distinct kickoff dates for World Cup fixtures must match the 7-stage map (group 6/11–6/28, R32 6/29–7/4, R16 7/5–7/8, QF 7/10–7/12, SF 7/15–7/16, 3rd_place 7/19, final 7/20).
@@ -302,14 +308,14 @@ Two complementary Slack surfaces so Clara never needs to open the dashboard:
 KPI snapshot (yesterday vs rolling-5 median):
   Follow Streamer Bet Count (NS)       <total>   ▲/▼ <%>
   Bet During Watch Turnover (NS, RM)   <total>   ▲/▼ <%>
-  Donation Amount (NS, USD)            <total>   ▲/▼ <%>
+  gift Amount (NS, USD)            <total>   ▲/▼ <%>
   Follow Streamer Bet Turnover (L1,RM) <total>   ▲/▼ <%>
-  Donation User Count (L1)             <total>   ▲/▼ <%>
+  gift User Count (L1)             <total>   ▲/▼ <%>
   Bet During Watch Count (L2)          <total>   ▲/▼ <%>
 
 ⚽ Top 1 match + streamer highest Follow bet count
 ⚽ Top 1 match + streamer highest BdW turnover
-⚽ Top 1 match + streamer highest Donation
+⚽ Top 1 match + streamer highest gift
 
 
 ⚠️ <N> alerts overnight — see thread
@@ -327,9 +333,9 @@ Implementation in `apps_script/alerts.gs` → `runDaily()`; scheduled at ~15:00 
 |---|---|---|
 | Follow Streamer Bet Count (NS) | ≤ −30% | ≤ −50% |
 | Bet During Watch Turnover (NS, RM) | ≤ −30% | ≤ −50% |
-| Donation Amount (NS, USD) | ≤ −40% | ≤ −60% |
+| gift Amount (NS, USD) | ≤ −40% | ≤ −60% |
 | Follow Streamer Bet Turnover (L1, RM) | ≤ −30% | ≤ −50% |
-| Donation User Count (L1) | ≤ −30% | ≤ −50% |
+| gift User Count (L1) | ≤ −30% | ≤ −50% |
 | Bet During Watch Count (L2) | ≤ −30% | ≤ −50% |
 
 **Weekly:** weekly stream count drops >20% vs cumulative-prior-weeks average.
@@ -348,7 +354,7 @@ Implementation in `apps_script/alerts.gs` → `runDaily()`; scheduled at ~15:00 
 
 **Platform side:** all non-voided bets from `fact_live_bet` (no stream filter). `status_id` filter TBD via Phase 0 probe.
 
-**Currency (worldcup dashboard):** turnover in **RM** (raw `member_to` family); donation / tip / box / wheel in **USD** (MYR / 4.2). See `bq-filter-rules` skill for the override note.
+**Currency (worldcup dashboard):** turnover in **RM** (raw `member_to` family); gift / tip / box / wheel in **USD** (MYR / 4.2). See `bq-filter-rules` skill for the override note.
 
 **Scope A (per match)** — `our / platform` on the same `SabaMatchId`, platform side restricted to sites with streamer function. Answers: "Did our streams capture more of this match?"
 
@@ -363,7 +369,7 @@ Scope A rolls up to streamer / week / month via `dim_streamer`. Scope B is a sea
 1. **Per-viewer normalization.** A drop in raw Tip Amount can be (a) fewer viewers or (b) same viewers tipping less — different fixes. Track raw + per-viewer side-by-side.
 2. **Stream-length normalization.** 30-min vs 3-hour streams produce wildly different absolutes. Per-hour rates fix this.
 3. **Bet status filter.** `fact_live_bet.status_id` includes pending/voided — confirm settled values via probe before using `member_to`.
-4. **Mixed-currency reporting (intentional).** Turnover stays RM (`*_turnover_rm`); donation/tip/box/wheel convert to USD (`*_usd`). Make sure the digest and dashboard label each metric with its unit so RM and USD aren't compared directly.
+4. **Mixed-currency reporting (intentional).** Turnover stays RM (`*_turnover_rm`); gift/tip/box/wheel convert to USD (`*_usd`). Make sure the digest and dashboard label each metric with its unit so RM and USD aren't compared directly.
 5. **Mean reversion.** After a hot streak, "back to normal" looks like a drop. Pair relative threshold with an absolute floor.
 6. **Tier-aware thresholds.** Rookies are noisier than top streamers. Consider looser thresholds (or skip anomaly alerts) for `dim_streamer.tier = 'rookie'`.
 7. **Match mixing.** Brazil match vs minor-team match in a rolling median is apples-to-oranges. The stage-adaptive baseline (group/R32/R16 use 3 priors; QF+ use 1 prior) partly addresses this; surface match label in the alert context so reviewers can dismiss false positives.
@@ -398,7 +404,7 @@ Three concrete deliverables, ordered:
    - `dim_match.sql` — built from `match_info` filtered to World Cup; manual `match_stage` lookup for ~64 fixtures
    - `dim_streamer.sql` — built from `chatroom_anchor`; tier derived from history in `core_streaming_performance`
 3. **Run the 4 discovery probes** (`sql/phase0_discovery.sql`) to confirm:
-   - Donation composition (tip + box + wheel?)
+   - gift composition (tip + box + wheel?)
    - World Cup filter string in `match_info.League` (likely `WORLD CUP`)
    - `is_lic` meaning + `status_id` settled values
    - Match-stage date fit (verify kickoffs match the 7-stage map)
