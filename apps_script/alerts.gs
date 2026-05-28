@@ -134,7 +134,7 @@ function buildDigest_(sessions, yesterday, alerts) {
   byStreamer.sort(function(a, b) { return b.follow_streamer_bet_count - a.follow_streamer_bet_count; });
   const topStreamers = byStreamer.slice(0, 3).map(function(s, i) {
     const r = yest.find(function(x) { return x.streamer_id === s.streamer_id; }) || {};
-    return '  ' + (i + 1) + '. ' + (r.streamer_name || s.streamer_id) +
+    return '  ' + (i + 1) + '. ' + (r.streamer || s.streamer_id) +
            ' — ' + (s.follow_streamer_bet_count || 0) + ' follow bets, ' +
            formatVal_(s.donation_amount_usd, 'usd') + ' donations';
   });
@@ -143,9 +143,7 @@ function buildDigest_(sessions, yesterday, alerts) {
   const byMatch = groupAndSum_(yest, 'SabaMatchId', ['follow_streamer_bet_count', 'bdw_turnover_rm']);
   byMatch.sort(function(a, b) { return b.follow_streamer_bet_count - a.follow_streamer_bet_count; });
   const topMatches = byMatch.slice(0, 3).map(function(m, i) {
-    const r = yest.find(function(x) { return x.SabaMatchId === m.SabaMatchId; }) || {};
-    const label = (r.HomeCnName && r.AwayCnName) ? (r.HomeCnName + ' vs ' + r.AwayCnName) : (m.SabaMatchId || 'n/a');
-    return '  ' + (i + 1) + '. ' + label + ' — ' + (m.follow_streamer_bet_count || 0) + ' follow bets';
+    return '  ' + (i + 1) + '. Match ' + (m.SabaMatchId || 'n/a') + ' — ' + (m.follow_streamer_bet_count || 0) + ' follow bets';
   });
 
   const alertSummary = summarizeAlerts_(alerts);
@@ -228,7 +226,7 @@ function evaluateAlerts_(sessions, yesterday) {
           if (severity) {
             alerts.push(makeAlert_({
               date: yesterday, type: 'threshold', severity: severity,
-              streamer_id: streamerId, streamer_name: s.streamer_name,
+              streamer_id: streamerId, streamer_name: s.streamer,
               match_id: s.SabaMatchId, match_label: matchLabel_(s),
               metric: kpi.label, metric_col: kpi.col, fmt: kpi.fmt,
               value: current, expected: med, delta: delta,
@@ -243,7 +241,7 @@ function evaluateAlerts_(sessions, yesterday) {
         if (mad > 0 && Math.abs(current - med) > CONFIG.ANOMALY_MAD_MULTIPLIER * mad) {
           alerts.push(makeAlert_({
             date: yesterday, type: 'anomaly', severity: 'medium',
-            streamer_id: streamerId, streamer_name: s.streamer_name,
+            streamer_id: streamerId, streamer_name: s.streamer,
             match_id: s.SabaMatchId, match_label: matchLabel_(s),
             metric: kpi.label, metric_col: kpi.col, fmt: kpi.fmt,
             value: current, expected: med, delta: delta,
@@ -267,7 +265,7 @@ function evaluateAlerts_(sessions, yesterday) {
     const last = ses[ses.length - 1];
     alerts.push(makeAlert_({
       date: yesterday, type: 'absent', severity: 'low',
-      streamer_id: streamerId, streamer_name: last.streamer_name,
+      streamer_id: streamerId, streamer_name: last.streamer,
       match_id: '', match_label: '',
       metric: 'Streamer absent', metric_col: 'absent', fmt: 'int',
       value: 0, expected: '—', delta: null,
@@ -281,7 +279,6 @@ function evaluateAlerts_(sessions, yesterday) {
 function makeAlert_(a) { return a; }
 
 function matchLabel_(s) {
-  if (s.HomeCnName && s.AwayCnName) return s.HomeCnName + ' vs ' + s.AwayCnName;
   return s.SabaMatchId || '';
 }
 

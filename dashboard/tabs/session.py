@@ -58,13 +58,12 @@ def _daily_bar(df):
 
 
 _TABLE_COLS = [
-    'streamer_name', 'day', 'start_ts', 'HomeCnName', 'AwayCnName',
+    'streamer', 'stream_name', 'day', 'start_ts', 'match_stage', 'time_slot_taipei',
     'follow_streamer_bet_count', 'bdw_turnover_rm', 'donation_amount_usd',
     'recommend_bet_count', 'follow_streamer_bet_turnover_rm',
     'follow_user_count', 'donation_user_count', 'donation_count',
-    'bdw_bet_count', 'viewers', 'pcu', 'watch_seconds_per_viewer',
-    'self_bet_count', 'self_bet_turnover_rm',
-    'follow_user_bet_count', 'follow_user_bet_turnover_rm',
+    'bdw_bet_count', 'viewers', 'watch_over_10min_user', 'pcu', 'watch_min_per_viewer',
+    'chat_user', 'message_count',
     'total_bet_count', 'total_bet_turnover_rm',
 ]
 

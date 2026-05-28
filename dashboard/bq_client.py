@@ -13,9 +13,7 @@ AGG_COLS = [
     'follow_user_count', 'donation_user_count', 'donation_count',
     'tip_amount_usd', 'tip_count', 'box_amount_usd', 'box_count',
     'wheel_amount_usd', 'wheel_count',
-    'self_bet_count', 'follow_user_bet_count',
-    'self_bet_turnover_rm', 'follow_user_bet_turnover_rm',
-    'bdw_bet_count', 'watch_seconds_total', 'viewers',
+    'bdw_bet_count', 'watch_min_total', 'viewers',
     'watch_over_10min_user', 'total_bet_count', 'total_bet_turnover_rm',
 ]
 
@@ -42,11 +40,11 @@ def _full_session():
         return _cache[key]
     df = _query(f"""
         SELECT
-            stream_id, streamer_id, streamer_name, day, start_ts, end_ts,
+            stream_id, streamer_id, streamer, stream_name, day, start_ts, end_ts,
             stream_type, language, site, currency,
-            SabaMatchId, HomeCnName, AwayCnName, KickOffTime, time_slot_taipei,
+            SabaMatchId, KickOffTime, time_slot_taipei, day_of_week, match_stage,
             {', '.join(AGG_COLS)},
-            watch_seconds_per_viewer, pcu, chatters, message_count
+            watch_min_per_viewer, pcu, chat_user, message_count
         FROM `{DATASET}.agg_session_metrics`
         WHERE day BETWEEN DATE '2026-06-01' AND DATE '2026-07-31'
         ORDER BY day, start_ts
@@ -61,9 +59,9 @@ def get_streamers():
     if key in _cache:
         return _cache[key]
     df = _query(f"""
-        SELECT DISTINCT streamer_id, streamer_name
+        SELECT DISTINCT streamer_id, streamer
         FROM `{DATASET}.agg_session_metrics`
-        ORDER BY streamer_name
+        ORDER BY streamer
     """)
     _cache.set(key, df, expire=3600)
     return df
@@ -92,7 +90,7 @@ def get_weekly(streamer_ids=None):
 
     sum_cols = [c for c in AGG_COLS if c in df.columns]
     weekly = (
-        df.groupby(['streamer_id', 'streamer_name', pd.Grouper(key='day', freq='W-MON')])[sum_cols]
+        df.groupby(['streamer_id', 'streamer', pd.Grouper(key='day', freq='W-MON')])[sum_cols]
         .sum()
         .reset_index()
         .rename(columns={'day': 'iso_week_start'})
@@ -130,7 +128,7 @@ def get_monthly(streamer_ids=None):
 
     sum_cols = [c for c in AGG_COLS if c in df.columns]
     monthly = (
-        df.groupby(['streamer_id', 'streamer_name', 'month_start', 'period_label'])[sum_cols]
+        df.groupby(['streamer_id', 'streamer', 'month_start', 'period_label'])[sum_cols]
         .sum()
         .reset_index()
         .sort_values(['streamer_id', 'month_start'])
@@ -139,7 +137,7 @@ def get_monthly(streamer_ids=None):
     # vs_june delta columns on July rows
     vs_cols = [
         'follow_streamer_bet_count', 'follow_streamer_bet_turnover_rm',
-        'bdw_turnover_rm', 'donation_amount_usd', 'watch_seconds_total',
+        'bdw_turnover_rm', 'donation_amount_usd', 'watch_min_total',
     ]
     june = monthly[monthly['period_label'] == 'June'].set_index('streamer_id')[vs_cols]
     july_mask = monthly['period_label'] == 'July'
