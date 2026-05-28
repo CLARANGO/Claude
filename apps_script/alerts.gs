@@ -172,9 +172,9 @@ function buildDigest_(sessions, yesterday, alerts) {
       const deltaStr = delta == null ? 'n/a' : Math.abs(delta * 100).toFixed(0) + '%';
       return '  ' + padR_(kpi.label, 32) + padL_(formatVal_(v, kpi.fmt), 14) + '   ' + arrow + ' ' + deltaStr;
     });
-    const matchId = s.SabaMatchId || 'n/a';
+    const streamId = s.stream_id || s.SabaMatchId || 'n/a';
     const streamer = s.streamer || s.streamer_id || '?';
-    return '*⚽ Match ' + matchId + ' · ' + streamer + '*\n```\n' + lines.join('\n') + '\n```';
+    return '*⚽ Match ' + streamId + ' · ' + streamer + '*\n```\n' + lines.join('\n') + '\n```';
   });
 
   const alertSummary = summarizeAlerts_(alerts);
@@ -215,15 +215,16 @@ function buildWeeklyDigest_(sessions, weekStart, weekEnd) {
            ', ' + formatVal_(s.donation_amount_usd, 'usd') + ' donations';
   });
 
-  const byMatch = groupAndSum_(weekSessions, 'SabaMatchId', ['follow_streamer_bet_count', 'bdw_turnover_rm']);
+  const byMatch = groupAndSum_(weekSessions, 'stream_id', ['follow_streamer_bet_count', 'bdw_turnover_rm']);
   byMatch.sort(function(a, b) { return b.follow_streamer_bet_count - a.follow_streamer_bet_count; });
   const top5Matches = byMatch.slice(0, 5).map(function(m, i) {
-    return '  ' + (i + 1) + '. Match ' + (m.SabaMatchId || 'n/a') +
+    return '  ' + (i + 1) + '. Match ' + (m.stream_id || 'n/a') +
            ' — ' + (m.follow_streamer_bet_count || 0) + ' follow bets' +
            ', ' + formatVal_(m.bdw_turnover_rm, 'rm') + ' BDW';
   });
 
-  const matchCount = distinct_(weekSessions, 'SabaMatchId').length;
+  // 1 stream = 1 match coverage; stream_id is always populated, SabaMatchId may be NULL
+  const matchCount = distinct_(weekSessions, 'stream_id').length;
   const avgLines = CONFIG.KPIS.map(function(kpi) {
     const total = sum_(weekSessions, kpi.col);
     const avg = matchCount > 0 ? total / matchCount : null;
@@ -232,9 +233,8 @@ function buildWeeklyDigest_(sessions, weekStart, weekEnd) {
   });
 
   return '*📅 Weekly Report — ' + weekDateLabel_(weekStart, weekEnd) + '*\n' +
-    '_' + distinct_(weekSessions, 'stream_id').length + ' streams · ' +
-      distinct_(weekSessions, 'streamer_id').length + ' streamers · ' +
-      matchCount + ' matches_\n' +
+    '_' + matchCount + ' matches · ' +
+      distinct_(weekSessions, 'streamer_id').length + ' streamers_\n' +
     '\n*NS Weekly Totals (vs cumulative prior-weeks avg):*\n```\n' +
     kpiLines.join('\n') + '\n```\n' +
     '\n*NS Avg per match (' + matchCount + ' matches):*\n```\n' +
@@ -309,7 +309,7 @@ function evaluateAlerts_(sessions, yesterday) {
             alerts.push(makeAlert_({
               date: yesterday, type: 'threshold', severity: severity,
               streamer_id: streamerId, streamer_name: s.streamer,
-              match_id: s.SabaMatchId, match_label: matchLabel_(s),
+              match_id: s.stream_id || s.SabaMatchId, match_label: matchLabel_(s),
               metric: kpi.label, metric_col: kpi.col, fmt: kpi.fmt,
               value: current, expected: med, delta: delta,
               note: 'Drop ' + (delta * 100).toFixed(0) + '% vs rolling-5 median',
@@ -361,7 +361,7 @@ function evaluateAlerts_(sessions, yesterday) {
 function makeAlert_(a) { return a; }
 
 function matchLabel_(s) {
-  return s.SabaMatchId || '';
+  return s.stream_id || s.SabaMatchId || '';
 }
 
 // ============================================================
