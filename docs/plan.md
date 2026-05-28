@@ -165,7 +165,7 @@ L2 Watch Time total (min)           = SUM(watch_sec) / 60
 L2 Watch Time per viewer (min)      = (SUM(watch_sec)/60) / COUNT(DISTINCT cust_id WHERE if_watch = 1)
 Viewers                             = COUNT(DISTINCT cust_id WHERE if_watch = 1)
 Viewers over 10 min                 = COUNT(DISTINCT cust_id WHERE if_watch=1 AND watch_sec >= 600)
-PCU (peak concurrent users)         = MAX(call_pcu) from nf-bifrost.livestream_dm.mart_comprehensive_metrics
+PCU (peak concurrent users)         = MAX(call_pcu) from nf-bifrost.livestream_dm.fact_stream_viewship (join on stream_id + anchor_id)
 ```
 
 ### Filters

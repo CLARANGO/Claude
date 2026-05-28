@@ -281,7 +281,8 @@ JOIN core_streaming_performance csp
 | L1 Stream Count | `COUNT(DISTINCT CONCAT(anchor_id,'-',stream_id))` per streamer × period |
 | L2 Bet Turnover (Follow Streamer / Follow User / Self) | `follow_member_to` / `follow_player_member_to` / (total − the other two). No Follow System in this dashboard. |
 | L2 Bet During Watch — Count | `SUM(during_watch_bet_count)` |
-| L2 Watch Time | `SUM(watch_sec)` total + avg per viewer; **PCU** not on `core_streaming_performance` (separate source needed) |
+| L2 Watch Time | `SUM(watch_sec)` total + avg per viewer |
+| PCU (peak concurrent users) | `MAX(call_pcu)` from `nf-bifrost.livestream_dm.fact_stream_viewship` — LEFT JOIN on `stream_id + anchor_id` |
 | Viewers | `COUNT(DISTINCT cust_id) WHERE if_watch = 1` |
 
 ---

@@ -93,6 +93,13 @@ function runDaily() {
 
   writeAlertLog_(ss, alerts, yesterday);
   applyConditionalFormatting_(ss);
+
+  // Weekly report — fires every Monday, summarising the completed Mon–Sun week
+  if (isMonday_()) {
+    const weekRange = priorWeekRange_(yesterday);
+    const weekReport = buildWeeklyDigest_(sessions, weekRange.start, weekRange.end);
+    postSlack_(weekReport);
+  }
 }
 
 /** Test helper — posts a sample digest with today's data, no thread. */
@@ -161,6 +168,55 @@ function buildDigest_(sessions, yesterday, alerts) {
     '\n' + alertSummary;
 
   return text;
+}
+
+// ============================================================
+// Weekly digest builder
+// ============================================================
+
+function buildWeeklyDigest_(sessions, weekStart, weekEnd) {
+  const weekSessions = sessions.filter(function(r) {
+    const d = formatDate_(r.day);
+    return d >= weekStart && d <= weekEnd;
+  });
+
+  const kpiLines = CONFIG.KPIS.map(function(kpi) {
+    const total = sum_(weekSessions, kpi.col);
+    const baseline = cumulativePriorWeeksAvg_(sessions, weekStart, kpi.col);
+    const delta = baseline > 0 ? (total - baseline) / baseline : null;
+    const arrow = delta == null ? '—' : (delta >= 0 ? '▲' : '▼');
+    const deltaStr = delta == null ? 'n/a' : Math.abs(delta * 100).toFixed(0) + '%';
+    return '  ' + padR_(kpi.label, 32) + padL_(formatVal_(total, kpi.fmt), 14) + '   ' + arrow + ' ' + deltaStr;
+  });
+
+  const byStreamer = groupAndSum_(weekSessions, 'streamer_id', ['follow_streamer_bet_count', 'bdw_turnover_rm', 'donation_amount_usd']);
+  byStreamer.sort(function(a, b) { return b.follow_streamer_bet_count - a.follow_streamer_bet_count; });
+  const top5Streamers = byStreamer.slice(0, 5).map(function(s, i) {
+    const r = weekSessions.find(function(x) { return x.streamer_id === s.streamer_id; }) || {};
+    return '  ' + (i + 1) + '. ' + (r.streamer || s.streamer_id) +
+           ' — ' + (s.follow_streamer_bet_count || 0) + ' follow bets' +
+           ', ' + formatVal_(s.bdw_turnover_rm, 'rm') + ' BDW' +
+           ', ' + formatVal_(s.donation_amount_usd, 'usd') + ' donations';
+  });
+
+  const byMatch = groupAndSum_(weekSessions, 'SabaMatchId', ['follow_streamer_bet_count', 'bdw_turnover_rm']);
+  byMatch.sort(function(a, b) { return b.follow_streamer_bet_count - a.follow_streamer_bet_count; });
+  const top5Matches = byMatch.slice(0, 5).map(function(m, i) {
+    return '  ' + (i + 1) + '. Match ' + (m.SabaMatchId || 'n/a') +
+           ' — ' + (m.follow_streamer_bet_count || 0) + ' follow bets' +
+           ', ' + formatVal_(m.bdw_turnover_rm, 'rm') + ' BDW';
+  });
+
+  return '*📅 Weekly Report — ' + weekDateLabel_(weekStart, weekEnd) + '*\n' +
+    '_' + distinct_(weekSessions, 'stream_id').length + ' streams · ' +
+      distinct_(weekSessions, 'streamer_id').length + ' streamers · ' +
+      distinct_(weekSessions, 'SabaMatchId').length + ' matches_\n' +
+    '\n*NS Weekly Totals (vs cumulative prior-weeks avg):*\n```\n' +
+    kpiLines.join('\n') + '\n```\n' +
+    '\n*🏆 Top 5 streamers (Follow Bet Count):*\n' +
+      (top5Streamers.length ? top5Streamers.join('\n') : '  _no data_') + '\n' +
+    '\n*⚽ Top 5 matches (Follow Bet Count):*\n' +
+      (top5Matches.length ? top5Matches.join('\n') : '  _no data_') + '\n';
 }
 
 function summarizeAlerts_(alerts) {
@@ -456,3 +512,63 @@ function formatVal_(v, fmt) {
 
 function padR_(s, n) { s = String(s); return s.length >= n ? s : s + ' '.repeat(n - s.length); }
 function padL_(s, n) { s = String(s); return s.length >= n ? s : ' '.repeat(n - s.length) + s; }
+
+// ============================================================
+// Weekly helpers
+// ============================================================
+
+/** Average weekly total of `col` across all complete ISO weeks before weekStart. */
+function cumulativePriorWeeksAvg_(sessions, weekStart, col) {
+  const weekTotals = {};
+  sessions.forEach(function(r) {
+    if (formatDate_(r.day) >= weekStart) return;
+    const wStart = isoWeekStart_(r.day);
+    if (!weekTotals[wStart]) weekTotals[wStart] = 0;
+    weekTotals[wStart] += (Number(r[col]) || 0);
+  });
+  const weeks = Object.keys(weekTotals);
+  if (!weeks.length) return 0;
+  return weeks.reduce(function(s, w) { return s + weekTotals[w]; }, 0) / weeks.length;
+}
+
+/** ISO week Monday as 'yyyy-MM-dd' for any day value (Date or string). */
+function isoWeekStart_(dayVal) {
+  const p = formatDate_(dayVal).split('-');
+  const d = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+  const day = d.getDay();
+  d.setDate(d.getDate() + (day === 0 ? -6 : 1 - day));
+  return d.getFullYear() + '-' + pad2_(d.getMonth() + 1) + '-' + pad2_(d.getDate());
+}
+
+/** True when today is Monday in the configured timezone. */
+function isMonday_() {
+  return Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'EEEE') === 'Monday';
+}
+
+/**
+ * Mon–Sun range of the ISO week that just ended.
+ * Call only when isMonday_() is true — yesterday is the completed Sunday.
+ */
+function priorWeekRange_(yesterday) {
+  const p = yesterday.split('-');
+  const sun = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+  const mon = new Date(sun.getTime());
+  mon.setDate(sun.getDate() - 6);
+  return {
+    start: mon.getFullYear() + '-' + pad2_(mon.getMonth() + 1) + '-' + pad2_(mon.getDate()),
+    end: yesterday,
+  };
+}
+
+/** "Jun 9–15" or "Jun 30 – Jul 6" style label for a week range. */
+function weekDateLabel_(start, end) {
+  const M = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const sp = start.split('-'), ep = end.split('-');
+  const s = new Date(Number(sp[0]), Number(sp[1]) - 1, Number(sp[2]));
+  const e = new Date(Number(ep[0]), Number(ep[1]) - 1, Number(ep[2]));
+  return s.getMonth() === e.getMonth()
+    ? M[s.getMonth()] + ' ' + s.getDate() + '–' + e.getDate()
+    : M[s.getMonth()] + ' ' + s.getDate() + ' – ' + M[e.getMonth()] + ' ' + e.getDate();
+}
+
+function pad2_(n) { return n < 10 ? '0' + n : '' + n; }
