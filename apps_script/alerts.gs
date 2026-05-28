@@ -207,12 +207,22 @@ function buildWeeklyDigest_(sessions, weekStart, weekEnd) {
            ', ' + formatVal_(m.bdw_turnover_rm, 'rm') + ' BDW';
   });
 
+  const matchCount = distinct_(weekSessions, 'SabaMatchId').length;
+  const avgLines = CONFIG.KPIS.map(function(kpi) {
+    const total = sum_(weekSessions, kpi.col);
+    const avg = matchCount > 0 ? total / matchCount : null;
+    const display = avg == null ? 'n/a' : formatVal_(avg, kpi.fmt);
+    return '  ' + padR_(kpi.label, 32) + padL_(display, 14);
+  });
+
   return '*📅 Weekly Report — ' + weekDateLabel_(weekStart, weekEnd) + '*\n' +
     '_' + distinct_(weekSessions, 'stream_id').length + ' streams · ' +
       distinct_(weekSessions, 'streamer_id').length + ' streamers · ' +
-      distinct_(weekSessions, 'SabaMatchId').length + ' matches_\n' +
+      matchCount + ' matches_\n' +
     '\n*NS Weekly Totals (vs cumulative prior-weeks avg):*\n```\n' +
     kpiLines.join('\n') + '\n```\n' +
+    '\n*NS Avg per match (' + matchCount + ' matches):*\n```\n' +
+    avgLines.join('\n') + '\n```\n' +
     '\n*🏆 Top 5 streamers (Follow Bet Count):*\n' +
       (top5Streamers.length ? top5Streamers.join('\n') : '  _no data_') + '\n' +
     '\n*⚽ Top 5 matches (Follow Bet Count):*\n' +
