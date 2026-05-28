@@ -102,7 +102,7 @@ function runDaily() {
   }
 }
 
-/** Test helper — posts a sample digest with today's data, no thread. */
+/** Test helper — posts a sample daily digest, no thread. */
 function testDigest() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const yesterday = yesterdayInTz_(CONFIG.TIMEZONE);
@@ -110,6 +110,29 @@ function testDigest() {
   const alerts = evaluateAlerts_(sessions, yesterday);
   const digest = buildDigest_(sessions, yesterday, alerts);
   postSlackBlocks_(digest);
+}
+
+/**
+ * Test helper — manually posts the weekly report for the most recent
+ * completed Mon–Sun week. Use this on non-Mondays since runDaily only
+ * fires the weekly report on Mondays.
+ */
+function testWeekly() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sessions = readTab_(ss, CONFIG.SESSION_TAB);
+  if (!sessions.length) {
+    postSlack_('No data found in `' + CONFIG.SESSION_TAB + '` tab — weekly skipped.');
+    return;
+  }
+  // Find the most recent Sunday on or before yesterday
+  const today = new Date();
+  const offsetToSunday = (today.getDay() + 6) % 7 + 1; // day=Sun(0)→1, Mon(1)→7
+  const sun = new Date(today.getTime());
+  sun.setDate(today.getDate() - offsetToSunday);
+  const sunStr = Utilities.formatDate(sun, CONFIG.TIMEZONE, 'yyyy-MM-dd');
+  const range = priorWeekRange_(sunStr);
+  const report = buildWeeklyDigest_(sessions, range.start, range.end);
+  postSlack_(report);
 }
 
 /** Simple webhook ping. */
@@ -122,52 +145,45 @@ function testSlack() {
 // ============================================================
 
 function buildDigest_(sessions, yesterday, alerts) {
+  // One stream session = one streamer covering one match. Show every stream
+  // as its own block instead of an aggregated "yesterday total".
   const yest = sessions.filter(function(r) {
     return formatDate_(r.day) === yesterday;
   });
-
-  // KPI snapshot: yesterday's totals + delta vs streamer-weighted rolling-5 median
-  const kpiLines = CONFIG.KPIS.map(function(kpi) {
-    const total = sum_(yest, kpi.col);
-    const baselineTotal = streamerWeightedRollingMedian_(sessions, yesterday, kpi.col);
-    const delta = baselineTotal > 0 ? (total - baselineTotal) / baselineTotal : null;
-    const arrow = delta == null ? '—' : (delta >= 0 ? '▲' : '▼');
-    const deltaStr = delta == null ? 'n/a' : Math.abs(delta * 100).toFixed(0) + '%';
-    return '  ' + padR_(kpi.label, 32) + padL_(formatVal_(total, kpi.fmt), 14) + '   ' + arrow + ' ' + deltaStr;
+  yest.sort(function(a, b) {
+    return (Number(b.follow_streamer_bet_count) || 0) - (Number(a.follow_streamer_bet_count) || 0);
   });
 
-  // Top 3 streamers by NS Follow Streamer Bet Count
-  const byStreamer = groupAndSum_(yest, 'streamer_id', ['follow_streamer_bet_count', 'follow_streamer_bet_turnover_rm', 'donation_amount_usd']);
-  byStreamer.sort(function(a, b) { return b.follow_streamer_bet_count - a.follow_streamer_bet_count; });
-  const topStreamers = byStreamer.slice(0, 3).map(function(s, i) {
-    const r = yest.find(function(x) { return x.streamer_id === s.streamer_id; }) || {};
-    return '  ' + (i + 1) + '. ' + (r.streamer || s.streamer_id) +
-           ' — ' + (s.follow_streamer_bet_count || 0) + ' follow bets, ' +
-           formatVal_(s.donation_amount_usd, 'usd') + ' donations';
-  });
-
-  // Top 3 matches by NS Follow Streamer Bet Count
-  const byMatch = groupAndSum_(yest, 'SabaMatchId', ['follow_streamer_bet_count', 'bdw_turnover_rm']);
-  byMatch.sort(function(a, b) { return b.follow_streamer_bet_count - a.follow_streamer_bet_count; });
-  const topMatches = byMatch.slice(0, 3).map(function(m, i) {
-    return '  ' + (i + 1) + '. Match ' + (m.SabaMatchId || 'n/a') + ' — ' + (m.follow_streamer_bet_count || 0) + ' follow bets';
+  const matchBlocks = yest.map(function(s) {
+    const lines = CONFIG.KPIS.map(function(kpi) {
+      const v = Number(s[kpi.col]);
+      const priors = sessions
+        .filter(function(r) {
+          return r.streamer_id === s.streamer_id &&
+                 new Date(r.day) < new Date(s.day);
+        })
+        .sort(function(a, b) { return new Date(a.day) - new Date(b.day); })
+        .slice(-CONFIG.ROLLING_WINDOW)
+        .map(function(r) { return Number(r[kpi.col]); })
+        .filter(function(n) { return !isNaN(n); });
+      const med = median_(priors);
+      const delta = (med > 0 && !isNaN(v)) ? (v - med) / med : null;
+      const arrow = delta == null ? '—' : (delta >= 0 ? '▲' : '▼');
+      const deltaStr = delta == null ? 'n/a' : Math.abs(delta * 100).toFixed(0) + '%';
+      return '  ' + padR_(kpi.label, 32) + padL_(formatVal_(v, kpi.fmt), 14) + '   ' + arrow + ' ' + deltaStr;
+    });
+    const matchId = s.SabaMatchId || 'n/a';
+    const streamer = s.streamer || s.streamer_id || '?';
+    return '*⚽ Match ' + matchId + ' · ' + streamer + '*\n```\n' + lines.join('\n') + '\n```';
   });
 
   const alertSummary = summarizeAlerts_(alerts);
 
-  // Build Slack message
-  const text =
-    '*📊 World Cup Dashboard — ' + yesterday + '*\n' +
-    '_' + yest.length + ' streams · ' +
-      distinct_(yest, 'streamer_id').length + ' streamers · ' +
-      distinct_(yest, 'SabaMatchId').length + ' matches_\n' +
-    '\n*KPI snapshot (yesterday vs rolling-5 median):*\n```\n' +
-    kpiLines.join('\n') + '\n```\n' +
-    '\n*🏆 Top streamers:*\n' + (topStreamers.join('\n') || '  _no data_') + '\n' +
-    '\n*⚽ Top matches:*\n' + (topMatches.join('\n') || '  _no data_') + '\n' +
-    '\n' + alertSummary;
-
-  return text;
+  return '*📊 World Cup Dashboard — ' + yesterday + '*\n' +
+    '_' + yest.length + ' matches · ' +
+      distinct_(yest, 'streamer_id').length + ' streamers_\n\n' +
+    (matchBlocks.length ? matchBlocks.join('\n\n') : '_No matches yesterday._') +
+    '\n\n' + alertSummary;
 }
 
 // ============================================================
