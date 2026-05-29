@@ -1,0 +1,28 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Trip {
+  id           String        @id @default(cuid())
+  code         String        @unique
+  name         String
+  createdAt    DateTime      @default(now())
+  participants Participant[]
+}
+
+model Participant {
+  id            String   @id @default(cuid())
+  tripId        String
+  trip          Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  name          String
+  startDate     DateTime
+  endDate       DateTime
+  budget        Float
+  departureCity String
+  createdAt     DateTime @default(now())
+}
