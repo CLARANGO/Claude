@@ -145,8 +145,7 @@ function testSlack() {
 // ============================================================
 
 function buildDigest_(sessions, yesterday, alerts) {
-  // One stream session = one streamer covering one match. Show every stream
-  // as its own block instead of an aggregated "yesterday total".
+  // One stream session = one streamer covering one match.
   const yest = sessions.filter(function(r) {
     return formatDate_(r.day) === yesterday;
   });
@@ -154,29 +153,7 @@ function buildDigest_(sessions, yesterday, alerts) {
     return (Number(b.follow_streamer_bet_count) || 0) - (Number(a.follow_streamer_bet_count) || 0);
   });
 
-  const matchBlocks = yest.map(function(s) {
-    const lines = CONFIG.KPIS.map(function(kpi) {
-      const v = Number(s[kpi.col]);
-      const priors = sessions
-        .filter(function(r) {
-          return r.streamer_id === s.streamer_id &&
-                 new Date(r.day) < new Date(s.day);
-        })
-        .sort(function(a, b) { return new Date(a.day) - new Date(b.day); })
-        .slice(-CONFIG.ROLLING_WINDOW)
-        .map(function(r) { return Number(r[kpi.col]); })
-        .filter(function(n) { return !isNaN(n); });
-      const med = median_(priors);
-      const delta = (med > 0 && !isNaN(v)) ? (v - med) / med : null;
-      const arrow = delta == null ? '—' : (delta >= 0 ? '▲' : '▼');
-      const deltaStr = delta == null ? 'n/a' : Math.abs(delta * 100).toFixed(0) + '%';
-      return '  ' + padR_(kpi.label, 32) + padL_(formatVal_(v, kpi.fmt), 14) + '   ' + arrow + ' ' + deltaStr;
-    });
-    const streamId = s.stream_id || s.SabaMatchId || 'n/a';
-    const streamer = s.streamer || s.streamer_id || '?';
-    return '*⚽ Match ' + streamId + ' · ' + streamer + '*\n```\n' + lines.join('\n') + '\n```';
-  });
-
+  const matchBlocks = yest.map(function(s) { return buildMatchBlock_(sessions, s); });
   const alertSummary = summarizeAlerts_(alerts);
 
   return '*📊 World Cup Dashboard — ' + yesterday + '*\n' +
@@ -184,6 +161,62 @@ function buildDigest_(sessions, yesterday, alerts) {
       distinct_(yest, 'streamer_id').length + ' streamers_\n\n' +
     (matchBlocks.length ? matchBlocks.join('\n\n') : '_No matches yesterday._') +
     '\n\n' + alertSummary;
+}
+
+/** Per-match block: header + 2 comparison tables (last 2 matches, May avg). */
+function buildMatchBlock_(sessions, s) {
+  const streamId = s.stream_id || s.SabaMatchId || 'n/a';
+  const streamer = s.streamer || s.streamer_id || '?';
+  const matchName = cleanStreamName_(s.stream_name || '');
+  const stage = s.match_stage || 'n/a';
+  const pcu = (s.pcu != null && s.pcu !== '')
+    ? Math.round(Number(s.pcu)).toLocaleString() : 'n/a';
+
+  // Baseline 1 — streamer's own last 2 matches (any stage)
+  const last2 = sessions
+    .filter(function(p) {
+      return p.streamer_id === s.streamer_id && new Date(p.day) < new Date(s.day);
+    })
+    .sort(function(a, b) { return new Date(a.day) - new Date(b.day); })
+    .slice(-2);
+  const last2Lines = comparisonLines_(s, last2);
+
+  // Baseline 2 — streamer's average over all May 2026 sessions
+  const may = sessions.filter(function(p) {
+    return p.streamer_id === s.streamer_id && extractMonth_(p.day) === 5;
+  });
+  const mayLines = comparisonLines_(s, may);
+
+  return '*⚽ Match ' + streamId + ' · ' + streamer + '*\n' +
+    (matchName ? '_' + matchName + '_\n' : '') +
+    '_Stage: ' + stage + ' · PCU: ' + pcu + '_\n' +
+    '\n*vs Streamer\'s Last 2 Matches:*\n```\n' + last2Lines.join('\n') + '\n```\n' +
+    '*vs Streamer\'s May Avg:*\n```\n' + mayLines.join('\n') + '\n```';
+}
+
+/** Render one KPI delta-table comparing `current` row against an array of prior sessions. */
+function comparisonLines_(current, priors) {
+  return CONFIG.KPIS.map(function(kpi) {
+    const v = Number(current[kpi.col]);
+    const vals = (priors || [])
+      .map(function(r) { return Number(r[kpi.col]); })
+      .filter(function(n) { return !isNaN(n); });
+    const baseline = vals.length ? vals.reduce(function(a, x) { return a + x; }, 0) / vals.length : 0;
+    const delta = (baseline > 0 && !isNaN(v)) ? (v - baseline) / baseline : null;
+    const arrow = delta == null ? '—' : (delta >= 0 ? '▲' : '▼');
+    const deltaStr = delta == null ? 'n/a' : Math.abs(delta * 100).toFixed(0) + '%';
+    return '  ' + padR_(kpi.label, 32) + padL_(formatVal_(v, kpi.fmt), 14) + '   ' + arrow + ' ' + deltaStr;
+  });
+}
+
+/** Strip the trailing ` ( 12345 )` Saba-match-id suffix from stream_name. */
+function cleanStreamName_(name) {
+  if (!name) return '';
+  return String(name).replace(/\s*\(\s*\d+\s*\)\s*$/, '').trim();
+}
+
+function extractMonth_(dayVal) {
+  return Number(formatDate_(dayVal).split('-')[1]);
 }
 
 // ============================================================
@@ -195,16 +228,35 @@ function buildWeeklyDigest_(sessions, weekStart, weekEnd) {
     const d = formatDate_(r.day);
     return d >= weekStart && d <= weekEnd;
   });
+  const matchCount = distinct_(weekSessions, 'stream_id').length;
 
-  const kpiLines = CONFIG.KPIS.map(function(kpi) {
+  // 1) Weekly totals vs cumulative prior-weeks avg
+  const totalLines = CONFIG.KPIS.map(function(kpi) {
     const total = sum_(weekSessions, kpi.col);
     const baseline = cumulativePriorWeeksAvg_(sessions, weekStart, kpi.col);
-    const delta = baseline > 0 ? (total - baseline) / baseline : null;
-    const arrow = delta == null ? '—' : (delta >= 0 ? '▲' : '▼');
-    const deltaStr = delta == null ? 'n/a' : Math.abs(delta * 100).toFixed(0) + '%';
-    return '  ' + padR_(kpi.label, 32) + padL_(formatVal_(total, kpi.fmt), 14) + '   ' + arrow + ' ' + deltaStr;
+    return deltaLine_(kpi, total, baseline);
   });
 
+  // 2) Per-match avg vs prior-weeks per-match avg
+  const avgLines = CONFIG.KPIS.map(function(kpi) {
+    const thisAvg = matchCount > 0 ? sum_(weekSessions, kpi.col) / matchCount : 0;
+    const baseline = priorWeeksPerMatchAvg_(sessions, weekStart, kpi.col);
+    return deltaLine_(kpi, thisAvg, baseline);
+  });
+
+  // 3) Per-language block (sum the 3 NS metrics)
+  const byLang = groupAndSum_(weekSessions, 'language',
+    ['follow_streamer_bet_count', 'bdw_turnover_rm', 'donation_amount_usd']);
+  byLang.sort(function(a, b) { return b.follow_streamer_bet_count - a.follow_streamer_bet_count; });
+  const langLines = byLang.map(function(l) {
+    const lang = l.language || 'unknown';
+    return '  ' + padR_(String(lang), 8) +
+      ' — Follow: ' + (Math.round(l.follow_streamer_bet_count) || 0).toLocaleString() +
+      ' · BDW: ' + formatVal_(l.bdw_turnover_rm, 'rm') +
+      ' · Donations: ' + formatVal_(l.donation_amount_usd, 'usd');
+  });
+
+  // 4) Top 5 streamers
   const byStreamer = groupAndSum_(weekSessions, 'streamer_id', ['follow_streamer_bet_count', 'bdw_turnover_rm', 'donation_amount_usd']);
   byStreamer.sort(function(a, b) { return b.follow_streamer_bet_count - a.follow_streamer_bet_count; });
   const top5Streamers = byStreamer.slice(0, 5).map(function(s, i) {
@@ -215,34 +267,57 @@ function buildWeeklyDigest_(sessions, weekStart, weekEnd) {
            ', ' + formatVal_(s.donation_amount_usd, 'usd') + ' donations';
   });
 
+  // 5) Top 5 matches (with cleaned stream name)
   const byMatch = groupAndSum_(weekSessions, 'stream_id', ['follow_streamer_bet_count', 'bdw_turnover_rm']);
   byMatch.sort(function(a, b) { return b.follow_streamer_bet_count - a.follow_streamer_bet_count; });
   const top5Matches = byMatch.slice(0, 5).map(function(m, i) {
+    const r = weekSessions.find(function(x) { return x.stream_id === m.stream_id; }) || {};
+    const name = cleanStreamName_(r.stream_name || '');
     return '  ' + (i + 1) + '. Match ' + (m.stream_id || 'n/a') +
+           (name ? ' — ' + name : '') +
            ' — ' + (m.follow_streamer_bet_count || 0) + ' follow bets' +
            ', ' + formatVal_(m.bdw_turnover_rm, 'rm') + ' BDW';
-  });
-
-  // 1 stream = 1 match coverage; stream_id is always populated, SabaMatchId may be NULL
-  const matchCount = distinct_(weekSessions, 'stream_id').length;
-  const avgLines = CONFIG.KPIS.map(function(kpi) {
-    const total = sum_(weekSessions, kpi.col);
-    const avg = matchCount > 0 ? total / matchCount : null;
-    const display = avg == null ? 'n/a' : formatVal_(avg, kpi.fmt);
-    return '  ' + padR_(kpi.label, 32) + padL_(display, 14);
   });
 
   return '*📅 Weekly Report — ' + weekDateLabel_(weekStart, weekEnd) + '*\n' +
     '_' + matchCount + ' matches · ' +
       distinct_(weekSessions, 'streamer_id').length + ' streamers_\n' +
     '\n*NS Weekly Totals (vs cumulative prior-weeks avg):*\n```\n' +
-    kpiLines.join('\n') + '\n```\n' +
-    '\n*NS Avg per match (' + matchCount + ' matches):*\n```\n' +
+    totalLines.join('\n') + '\n```\n' +
+    '\n*NS Avg per Match (vs prior-weeks per-match avg):*\n```\n' +
     avgLines.join('\n') + '\n```\n' +
+    '\n*🌐 By Language:*\n' +
+    (langLines.length ? langLines.join('\n') : '  _no data_') + '\n' +
     '\n*🏆 Top 5 streamers (Follow Bet Count):*\n' +
       (top5Streamers.length ? top5Streamers.join('\n') : '  _no data_') + '\n' +
     '\n*⚽ Top 5 matches (Follow Bet Count):*\n' +
       (top5Matches.length ? top5Matches.join('\n') : '  _no data_') + '\n';
+}
+
+/** Shared formatter: value column + delta arrow + pct vs baseline. */
+function deltaLine_(kpi, value, baseline) {
+  const delta = baseline > 0 ? (value - baseline) / baseline : null;
+  const arrow = delta == null ? '—' : (delta >= 0 ? '▲' : '▼');
+  const deltaStr = delta == null ? 'n/a' : Math.abs(delta * 100).toFixed(0) + '%';
+  return '  ' + padR_(kpi.label, 32) + padL_(formatVal_(value, kpi.fmt), 14) + '   ' + arrow + ' ' + deltaStr;
+}
+
+/** Average of (weekly metric / weekly match count) across all complete prior weeks. */
+function priorWeeksPerMatchAvg_(sessions, weekStart, col) {
+  const perWeek = {};
+  sessions.forEach(function(r) {
+    if (formatDate_(r.day) >= weekStart) return;
+    const w = isoWeekStart_(r.day);
+    if (!perWeek[w]) perWeek[w] = { total: 0, count: 0 };
+    perWeek[w].total += (Number(r[col]) || 0);
+    perWeek[w].count += 1;   // 1 stream row = 1 match
+  });
+  const weeks = Object.keys(perWeek);
+  if (!weeks.length) return 0;
+  const avgs = weeks.map(function(w) {
+    return perWeek[w].count > 0 ? perWeek[w].total / perWeek[w].count : 0;
+  });
+  return avgs.reduce(function(a, x) { return a + x; }, 0) / avgs.length;
 }
 
 function summarizeAlerts_(alerts) {
