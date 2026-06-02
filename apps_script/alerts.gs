@@ -235,11 +235,12 @@ function avgOf_(rows, col) {
   return vals.reduce(function(a, x) { return a + x; }, 0) / vals.length;
 }
 
-/** Return "▲ N%" / "▼ N%" / "n/a" given a current value and a baseline. */
+/** Return colored delta indicator: '🟢 ▲ N%' / '🔴 ▼ N%' / 'n/a'. */
 function arrowDelta_(v, baseline) {
   if (!(baseline > 0) || isNaN(v)) return 'n/a';
   const delta = (v - baseline) / baseline;
-  return (delta >= 0 ? '▲ ' : '▼ ') + Math.abs(delta * 100).toFixed(0) + '%';
+  const pct = Math.abs(delta * 100).toFixed(0) + '%';
+  return delta >= 0 ? '🟢 ▲ ' + pct : '🔴 ▼ ' + pct;
 }
 
 /**
@@ -293,21 +294,10 @@ function buildWeeklyDigest_(sessions, weekStart, weekEnd) {
   });
   const matchCount = distinct_(weekSessions, 'stream_id').length;
 
-  // 1) Weekly totals vs cumulative prior-weeks avg
-  const totalLines = CONFIG.KPIS.map(function(kpi) {
-    const total = sum_(weekSessions, kpi.col);
-    const baseline = cumulativePriorWeeksAvg_(sessions, weekStart, kpi.col);
-    return deltaLine_(kpi, total, baseline);
-  });
+  // Combined KPI table: Metric / Total / Δ vs prior weeks / Avg per Match / Δ vs prior weeks per-match
+  const kpiTable = buildCombinedKpiTable_(sessions, weekSessions, weekStart, matchCount);
 
-  // 2) Per-match avg vs prior-weeks per-match avg
-  const avgLines = CONFIG.KPIS.map(function(kpi) {
-    const thisAvg = matchCount > 0 ? sum_(weekSessions, kpi.col) / matchCount : 0;
-    const baseline = priorWeeksPerMatchAvg_(sessions, weekStart, kpi.col);
-    return deltaLine_(kpi, thisAvg, baseline);
-  });
-
-  // 3) Per-language blocks — Totals + Avg/Match, same format as overview
+  // Per-language blocks — same combined table format, scoped to one language
   const langBlocks = buildLanguageBlocks_(sessions, weekSessions, weekStart);
 
   // 4) Top 5 streamers
@@ -336,16 +326,47 @@ function buildWeeklyDigest_(sessions, weekStart, weekEnd) {
   return '*📅 Weekly Report — ' + weekDateLabel_(weekStart, weekEnd) + '*\n' +
     '_' + matchCount + ' matches · ' +
       distinct_(weekSessions, 'streamer_id').length + ' streamers_\n' +
-    '\n*NS Weekly Totals (vs cumulative prior-weeks avg):*\n```\n' +
-    totalLines.join('\n') + '\n```\n' +
-    '\n*NS Avg per Match (vs prior-weeks per-match avg):*\n```\n' +
-    avgLines.join('\n') + '\n```\n' +
+    '\n*NS Weekly KPIs:*\n```\n' + kpiTable + '\n```\n' +
     '\n*🌐 By Language:*\n' +
     (langBlocks.length ? langBlocks.join('\n\n') : '  _no data_') + '\n' +
     '\n*🏆 Top 5 streamers (Follow Bet Count):*\n' +
       (top5Streamers.length ? top5Streamers.join('\n') : '  _no data_') + '\n' +
     '\n*⚽ Top 5 matches (Follow Bet Count):*\n' +
       (top5Matches.length ? top5Matches.join('\n') : '  _no data_') + '\n';
+}
+
+/**
+ * Combined weekly KPI table — one row per metric, with Total + Δ and
+ * Avg/Match + Δ side by side. Uses CONFIG.DISPLAY_METRICS (6 alert KPIs
+ * + PCU). PCU uses max for Total and mean for Avg/Match.
+ *
+ * `allSessions` is the unfiltered session pool for baseline math;
+ * `weekSessions` is just the rows inside [weekStart, weekEnd].
+ */
+function buildCombinedKpiTable_(allSessions, weekSessions, weekStart, matchCount) {
+  const rows = [[
+    'Metric',
+    'Total',
+    'vs prior-weeks avg',
+    'Avg/Match',
+    'vs prior-weeks per-match avg',
+  ]];
+  CONFIG.DISPLAY_METRICS.forEach(function(kpi) {
+    const total = aggregate_(weekSessions, kpi.col, kpi.agg);
+    const baselineTotal = cumulativePriorWeeksAvg_(allSessions, weekStart, kpi.col);
+    const avgPerMatch = matchCount > 0
+      ? (kpi.agg === 'max' ? aggregate_(weekSessions, kpi.col, 'avg') : total / matchCount)
+      : 0;
+    const baselineAvg = priorWeeksPerMatchAvg_(allSessions, weekStart, kpi.col);
+    rows.push([
+      kpi.label,
+      formatVal_(total, kpi.fmt),
+      arrowDelta_(total, baselineTotal),
+      formatVal_(avgPerMatch, kpi.fmt),
+      arrowDelta_(avgPerMatch, baselineAvg),
+    ]);
+  });
+  return formatTable_(rows);
 }
 
 /**
@@ -372,31 +393,9 @@ function buildLanguageBlocks_(sessions, weekSessions, weekStart) {
     const langWeek = byLangWeek[lang];
     const langAll = sessions.filter(function(r) { return (r.language || 'unknown') === lang; });
     const matchCount = distinct_(langWeek, 'stream_id').length;
-
-    const totalLines = CONFIG.KPIS.map(function(kpi) {
-      const total = sum_(langWeek, kpi.col);
-      const baseline = cumulativePriorWeeksAvg_(langAll, weekStart, kpi.col);
-      return deltaLine_(kpi, total, baseline);
-    });
-
-    const avgLines = CONFIG.KPIS.map(function(kpi) {
-      const thisAvg = matchCount > 0 ? sum_(langWeek, kpi.col) / matchCount : 0;
-      const baseline = priorWeeksPerMatchAvg_(langAll, weekStart, kpi.col);
-      return deltaLine_(kpi, thisAvg, baseline);
-    });
-
-    return '*' + lang + '* _(' + matchCount + ' matches)_\n' +
-      '_Totals (vs prior-weeks avg):_\n```\n' + totalLines.join('\n') + '\n```\n' +
-      '_Avg per Match (vs prior-weeks per-match avg):_\n```\n' + avgLines.join('\n') + '\n```';
+    const table = buildCombinedKpiTable_(langAll, langWeek, weekStart, matchCount);
+    return '*' + lang + '* _(' + matchCount + ' matches)_\n```\n' + table + '\n```';
   });
-}
-
-/** Shared formatter: value column + delta arrow + pct vs baseline. */
-function deltaLine_(kpi, value, baseline) {
-  const delta = baseline > 0 ? (value - baseline) / baseline : null;
-  const arrow = delta == null ? '—' : (delta >= 0 ? '▲' : '▼');
-  const deltaStr = delta == null ? 'n/a' : Math.abs(delta * 100).toFixed(0) + '%';
-  return '  ' + padR_(kpi.label, 32) + padL_(formatVal_(value, kpi.fmt), 14) + '   ' + arrow + ' ' + deltaStr;
 }
 
 /** Average of (weekly metric / weekly match count) across all complete prior weeks. */
