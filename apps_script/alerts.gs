@@ -307,8 +307,8 @@ function buildWeeklyDigest_(sessions, weekStart, weekEnd) {
     return deltaLine_(kpi, thisAvg, baseline);
   });
 
-  // 3) Per-language blocks — full metrics table (Total + Avg/Match) per language
-  const langBlocks = buildLanguageBlocks_(weekSessions);
+  // 3) Per-language blocks — Totals + Avg/Match, same format as overview
+  const langBlocks = buildLanguageBlocks_(sessions, weekSessions, weekStart);
 
   // 4) Top 5 streamers
   const byStreamer = groupAndSum_(weekSessions, 'streamer_id', ['follow_streamer_bet_count', 'bdw_turnover_rm', 'donation_amount_usd']);
@@ -349,43 +349,45 @@ function buildWeeklyDigest_(sessions, weekStart, weekEnd) {
 }
 
 /**
- * Per-language full-metrics tables. One block per language with a
- * 3-column table (Metric / Total / Avg/Match) covering DISPLAY_METRICS.
- * PCU is aggregated as max (peak), the rest as sum.
+ * Per-language blocks — same shape as the weekly overview: a Totals
+ * table and an Avg/Match table, each with the delta column. Baselines
+ * are computed from prior weeks of the SAME language only, so each
+ * language is compared against its own history.
  */
-function buildLanguageBlocks_(weekSessions) {
-  const byLang = {};
+function buildLanguageBlocks_(sessions, weekSessions, weekStart) {
+  const byLangWeek = {};
   weekSessions.forEach(function(r) {
     const lang = r.language || 'unknown';
-    if (!byLang[lang]) byLang[lang] = [];
-    byLang[lang].push(r);
+    if (!byLangWeek[lang]) byLangWeek[lang] = [];
+    byLangWeek[lang].push(r);
   });
 
   // Sort languages by Follow Streamer Bet Count desc
-  const sortedLangs = Object.keys(byLang).sort(function(a, b) {
-    return aggregate_(byLang[b], 'follow_streamer_bet_count', 'sum') -
-           aggregate_(byLang[a], 'follow_streamer_bet_count', 'sum');
+  const sortedLangs = Object.keys(byLangWeek).sort(function(a, b) {
+    return sum_(byLangWeek[b], 'follow_streamer_bet_count') -
+           sum_(byLangWeek[a], 'follow_streamer_bet_count');
   });
 
   return sortedLangs.map(function(lang) {
-    const rows = byLang[lang];
-    const matchCount = distinct_(rows, 'stream_id').length;
+    const langWeek = byLangWeek[lang];
+    const langAll = sessions.filter(function(r) { return (r.language || 'unknown') === lang; });
+    const matchCount = distinct_(langWeek, 'stream_id').length;
 
-    const table = [['Metric', 'Total', 'Avg/Match']];
-    CONFIG.DISPLAY_METRICS.forEach(function(kpi) {
-      const total = aggregate_(rows, kpi.col, kpi.agg);
-      // Avg per match: PCU uses mean across matches; sums divide by count
-      const avg = matchCount > 0
-        ? (kpi.agg === 'max' ? aggregate_(rows, kpi.col, 'avg') : total / matchCount)
-        : 0;
-      table.push([
-        kpi.label,
-        formatVal_(total, kpi.fmt),
-        formatVal_(avg, kpi.fmt),
-      ]);
+    const totalLines = CONFIG.KPIS.map(function(kpi) {
+      const total = sum_(langWeek, kpi.col);
+      const baseline = cumulativePriorWeeksAvg_(langAll, weekStart, kpi.col);
+      return deltaLine_(kpi, total, baseline);
     });
 
-    return '*' + lang + '* _(' + matchCount + ' matches)_\n```\n' + formatTable_(table) + '\n```';
+    const avgLines = CONFIG.KPIS.map(function(kpi) {
+      const thisAvg = matchCount > 0 ? sum_(langWeek, kpi.col) / matchCount : 0;
+      const baseline = priorWeeksPerMatchAvg_(langAll, weekStart, kpi.col);
+      return deltaLine_(kpi, thisAvg, baseline);
+    });
+
+    return '*' + lang + '* _(' + matchCount + ' matches)_\n' +
+      '_Totals (vs prior-weeks avg):_\n```\n' + totalLines.join('\n') + '\n```\n' +
+      '_Avg per Match (vs prior-weeks per-match avg):_\n```\n' + avgLines.join('\n') + '\n```';
   });
 }
 
