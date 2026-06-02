@@ -347,9 +347,9 @@ function buildCombinedKpiTable_(allSessions, weekSessions, weekStart, matchCount
   const rows = [[
     'Metric',
     'Total',
-    'vs prior-weeks avg',
+    'vs prior week avg',
     'Avg/Match',
-    'vs prior-weeks per-match avg',
+    'vs prior weeks avg/match',
   ]];
   CONFIG.DISPLAY_METRICS.forEach(function(kpi) {
     const total = aggregate_(weekSessions, kpi.col, kpi.agg);
