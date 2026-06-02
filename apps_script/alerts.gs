@@ -38,6 +38,29 @@ const CONFIG = {
     { col: 'bdw_bet_count',                    label: 'Bet During Watch Count (L2)',       fmt: 'int' },
   ],
 
+  // Daily per-match table — the 6 alert KPIs PLUS PCU. PCU uses 'max' aggregation
+  // when rolled up (peak); the 6 KPIs use sum. avg-per-match uses simple mean.
+  DISPLAY_METRICS: [
+    { col: 'follow_streamer_bet_count',        label: 'Follow Streamer Bet Count',    fmt: 'int', agg: 'sum' },
+    { col: 'bdw_turnover_rm',                  label: 'Bet During Watch Turnover',    fmt: 'rm',  agg: 'sum' },
+    { col: 'donation_amount_usd',              label: 'Donation Amount',              fmt: 'usd', agg: 'sum' },
+    { col: 'follow_streamer_bet_turnover_rm',  label: 'Follow Streamer Bet Turnover', fmt: 'rm',  agg: 'sum' },
+    { col: 'donation_user_count',              label: 'Donation User Count',          fmt: 'int', agg: 'sum' },
+    { col: 'bdw_bet_count',                    label: 'Bet During Watch Count',       fmt: 'int', agg: 'sum' },
+    { col: 'pcu',                              label: 'PCU',                          fmt: 'int', agg: 'max' },
+  ],
+
+  STAGE_LABELS: {
+    'group':     'Group Stage',
+    'R32':       'Round of 32',
+    'R16':       'Round of 16',
+    'QF':        'Quarter-Final',
+    'SF':        'Semi-Final',
+    '3rd_place': 'Third Place',
+    'final':     'Final',
+    'other':     'Other',
+  },
+
   // Min-volume gate (per session)
   MIN_VIEWERS: 100,
   MIN_BETS: 10,
@@ -163,14 +186,17 @@ function buildDigest_(sessions, yesterday, alerts) {
     '\n\n' + alertSummary;
 }
 
-/** Per-match block: header + 2 comparison tables (last 2 matches, May avg). */
+/**
+ * Per-match block: header + single 4-column comparison table.
+ * Columns: Metric | Value | vs Last 2 Matches | vs May Avg
+ */
 function buildMatchBlock_(sessions, s) {
   const streamId = s.stream_id || s.SabaMatchId || 'n/a';
   const streamer = s.streamer || s.streamer_id || '?';
   const matchName = cleanStreamName_(s.stream_name || '');
-  const stage = s.match_stage || 'n/a';
-  const pcu = (s.pcu != null && s.pcu !== '')
-    ? Math.round(Number(s.pcu)).toLocaleString() : 'n/a';
+  const stageKey = s.match_stage || 'n/a';
+  const stageLabel = CONFIG.STAGE_LABELS[stageKey] || stageKey;
+  const titleLine = stageLabel + (matchName ? ' — ' + matchName : '');
 
   // Baseline 1 — streamer's own last 2 matches (any stage)
   const last2 = sessions
@@ -179,34 +205,71 @@ function buildMatchBlock_(sessions, s) {
     })
     .sort(function(a, b) { return new Date(a.day) - new Date(b.day); })
     .slice(-2);
-  const last2Lines = comparisonLines_(s, last2);
 
   // Baseline 2 — streamer's average over all May 2026 sessions
   const may = sessions.filter(function(p) {
     return p.streamer_id === s.streamer_id && extractMonth_(p.day) === 5;
   });
-  const mayLines = comparisonLines_(s, may);
+
+  const rows = [['Metric', 'Value', 'vs Last 2', 'vs May Avg']];
+  CONFIG.DISPLAY_METRICS.forEach(function(kpi) {
+    const v = Number(s[kpi.col]);
+    rows.push([
+      kpi.label,
+      isNaN(v) ? 'n/a' : formatVal_(v, kpi.fmt),
+      arrowDelta_(v, avgOf_(last2, kpi.col)),
+      arrowDelta_(v, avgOf_(may, kpi.col)),
+    ]);
+  });
 
   return '*⚽ Match ' + streamId + ' · ' + streamer + '*\n' +
-    (matchName ? '_' + matchName + '_\n' : '') +
-    '_Stage: ' + stage + ' · PCU: ' + pcu + '_\n' +
-    '\n*vs Streamer\'s Last 2 Matches:*\n```\n' + last2Lines.join('\n') + '\n```\n' +
-    '*vs Streamer\'s May Avg:*\n```\n' + mayLines.join('\n') + '\n```';
+    '_' + titleLine + '_\n' +
+    '```\n' + formatTable_(rows) + '\n```';
 }
 
-/** Render one KPI delta-table comparing `current` row against an array of prior sessions. */
-function comparisonLines_(current, priors) {
-  return CONFIG.KPIS.map(function(kpi) {
-    const v = Number(current[kpi.col]);
-    const vals = (priors || [])
-      .map(function(r) { return Number(r[kpi.col]); })
-      .filter(function(n) { return !isNaN(n); });
-    const baseline = vals.length ? vals.reduce(function(a, x) { return a + x; }, 0) / vals.length : 0;
-    const delta = (baseline > 0 && !isNaN(v)) ? (v - baseline) / baseline : null;
-    const arrow = delta == null ? '—' : (delta >= 0 ? '▲' : '▼');
-    const deltaStr = delta == null ? 'n/a' : Math.abs(delta * 100).toFixed(0) + '%';
-    return '  ' + padR_(kpi.label, 32) + padL_(formatVal_(v, kpi.fmt), 14) + '   ' + arrow + ' ' + deltaStr;
-  });
+/** Mean of `col` across an array of session rows (NaNs filtered). */
+function avgOf_(rows, col) {
+  if (!rows || !rows.length) return 0;
+  const vals = rows.map(function(r) { return Number(r[col]); }).filter(function(n) { return !isNaN(n); });
+  if (!vals.length) return 0;
+  return vals.reduce(function(a, x) { return a + x; }, 0) / vals.length;
+}
+
+/** Return "▲ N%" / "▼ N%" / "n/a" given a current value and a baseline. */
+function arrowDelta_(v, baseline) {
+  if (!(baseline > 0) || isNaN(v)) return 'n/a';
+  const delta = (v - baseline) / baseline;
+  return (delta >= 0 ? '▲ ' : '▼ ') + Math.abs(delta * 100).toFixed(0) + '%';
+}
+
+/**
+ * Render a 2D array as an aligned monospace table.
+ * First row = headers; col 0 = left-aligned, rest right-aligned.
+ */
+function formatTable_(rows) {
+  if (!rows.length) return '';
+  const cols = rows[0].length;
+  const widths = [];
+  for (let c = 0; c < cols; c++) {
+    let w = 0;
+    rows.forEach(function(r) { w = Math.max(w, String(r[c] == null ? '' : r[c]).length); });
+    widths.push(w);
+  }
+  return rows.map(function(r) {
+    return r.map(function(v, i) {
+      const s = String(v == null ? '' : v);
+      return i === 0 ? padR_(s, widths[i]) : padL_(s, widths[i]);
+    }).join('  ');
+  }).join('\n');
+}
+
+/** Aggregate `col` across `rows` using sum / max / avg per the metric's agg field. */
+function aggregate_(rows, col, agg) {
+  const vals = (rows || []).map(function(r) { return Number(r[col]); }).filter(function(n) { return !isNaN(n); });
+  if (!vals.length) return 0;
+  if (agg === 'max') return Math.max.apply(null, vals);
+  if (agg === 'avg') return vals.reduce(function(a, x) { return a + x; }, 0) / vals.length;
+  return vals.reduce(function(a, x) { return a + x; }, 0);
 }
 
 /** Strip the trailing ` ( 12345 )` Saba-match-id suffix from stream_name. */
@@ -244,17 +307,8 @@ function buildWeeklyDigest_(sessions, weekStart, weekEnd) {
     return deltaLine_(kpi, thisAvg, baseline);
   });
 
-  // 3) Per-language block (sum the 3 NS metrics)
-  const byLang = groupAndSum_(weekSessions, 'language',
-    ['follow_streamer_bet_count', 'bdw_turnover_rm', 'donation_amount_usd']);
-  byLang.sort(function(a, b) { return b.follow_streamer_bet_count - a.follow_streamer_bet_count; });
-  const langLines = byLang.map(function(l) {
-    const lang = l.language || 'unknown';
-    return '  ' + padR_(String(lang), 8) +
-      ' — Follow: ' + (Math.round(l.follow_streamer_bet_count) || 0).toLocaleString() +
-      ' · BDW: ' + formatVal_(l.bdw_turnover_rm, 'rm') +
-      ' · Donations: ' + formatVal_(l.donation_amount_usd, 'usd');
-  });
+  // 3) Per-language blocks — full metrics table (Total + Avg/Match) per language
+  const langBlocks = buildLanguageBlocks_(weekSessions);
 
   // 4) Top 5 streamers
   const byStreamer = groupAndSum_(weekSessions, 'streamer_id', ['follow_streamer_bet_count', 'bdw_turnover_rm', 'donation_amount_usd']);
@@ -287,11 +341,52 @@ function buildWeeklyDigest_(sessions, weekStart, weekEnd) {
     '\n*NS Avg per Match (vs prior-weeks per-match avg):*\n```\n' +
     avgLines.join('\n') + '\n```\n' +
     '\n*🌐 By Language:*\n' +
-    (langLines.length ? langLines.join('\n') : '  _no data_') + '\n' +
+    (langBlocks.length ? langBlocks.join('\n\n') : '  _no data_') + '\n' +
     '\n*🏆 Top 5 streamers (Follow Bet Count):*\n' +
       (top5Streamers.length ? top5Streamers.join('\n') : '  _no data_') + '\n' +
     '\n*⚽ Top 5 matches (Follow Bet Count):*\n' +
       (top5Matches.length ? top5Matches.join('\n') : '  _no data_') + '\n';
+}
+
+/**
+ * Per-language full-metrics tables. One block per language with a
+ * 3-column table (Metric / Total / Avg/Match) covering DISPLAY_METRICS.
+ * PCU is aggregated as max (peak), the rest as sum.
+ */
+function buildLanguageBlocks_(weekSessions) {
+  const byLang = {};
+  weekSessions.forEach(function(r) {
+    const lang = r.language || 'unknown';
+    if (!byLang[lang]) byLang[lang] = [];
+    byLang[lang].push(r);
+  });
+
+  // Sort languages by Follow Streamer Bet Count desc
+  const sortedLangs = Object.keys(byLang).sort(function(a, b) {
+    return aggregate_(byLang[b], 'follow_streamer_bet_count', 'sum') -
+           aggregate_(byLang[a], 'follow_streamer_bet_count', 'sum');
+  });
+
+  return sortedLangs.map(function(lang) {
+    const rows = byLang[lang];
+    const matchCount = distinct_(rows, 'stream_id').length;
+
+    const table = [['Metric', 'Total', 'Avg/Match']];
+    CONFIG.DISPLAY_METRICS.forEach(function(kpi) {
+      const total = aggregate_(rows, kpi.col, kpi.agg);
+      // Avg per match: PCU uses mean across matches; sums divide by count
+      const avg = matchCount > 0
+        ? (kpi.agg === 'max' ? aggregate_(rows, kpi.col, 'avg') : total / matchCount)
+        : 0;
+      table.push([
+        kpi.label,
+        formatVal_(total, kpi.fmt),
+        formatVal_(avg, kpi.fmt),
+      ]);
+    });
+
+    return '*' + lang + '* _(' + matchCount + ' matches)_\n```\n' + formatTable_(table) + '\n```';
+  });
 }
 
 /** Shared formatter: value column + delta arrow + pct vs baseline. */
