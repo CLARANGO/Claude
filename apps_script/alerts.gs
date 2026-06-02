@@ -224,7 +224,7 @@ function buildMatchBlock_(sessions, s) {
 
   return '*⚽ Match ' + streamId + ' · ' + streamer + '*\n' +
     '_' + titleLine + '_\n' +
-    '```\n' + formatTable_(rows) + '\n```';
+    '```\n' + formatTable_(rows, [1]) + '\n```';
 }
 
 /** Mean of `col` across an array of session rows (NaNs filtered). */
@@ -245,11 +245,12 @@ function arrowDelta_(v, baseline) {
 
 /**
  * Render a 2D array as an aligned monospace table.
- * Col 0 (metric name) and col 2+ (delta/comparison) are left-aligned.
- * Col 1 (value / total) is right-aligned.
+ * `rightCols` = array of column indices to right-align (numeric value cols).
+ * All other columns are left-aligned.
  */
-function formatTable_(rows) {
+function formatTable_(rows, rightCols) {
   if (!rows.length) return '';
+  rightCols = rightCols || [];
   const cols = rows[0].length;
   const widths = [];
   for (let c = 0; c < cols; c++) {
@@ -260,7 +261,7 @@ function formatTable_(rows) {
   return rows.map(function(r) {
     return r.map(function(v, i) {
       const s = String(v == null ? '' : v);
-      return i === 1 ? padL_(s, widths[i]) : padR_(s, widths[i]);
+      return rightCols.indexOf(i) !== -1 ? padL_(s, widths[i]) : padR_(s, widths[i]);
     }).join('    ');
   }).join('\n');
 }
@@ -367,7 +368,8 @@ function buildCombinedKpiTable_(allSessions, weekSessions, weekStart, matchCount
       arrowDelta_(avgPerMatch, baselineAvg),
     ]);
   });
-  return formatTable_(rows);
+  // Col 1 = Total (right), col 3 = Avg/Match (right); cols 2 and 4 are deltas (left)
+  return formatTable_(rows, [1, 3]);
 }
 
 /**
