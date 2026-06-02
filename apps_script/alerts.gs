@@ -243,10 +243,7 @@ function arrowDelta_(v, baseline) {
   return delta >= 0 ? '🟢 ▲ ' + pct : '🔴 ▼ ' + pct;
 }
 
-/**
- * Render a 2D array as an aligned monospace table.
- * First row = headers; col 0 = left-aligned, rest right-aligned.
- */
+/** Render a 2D array as an aligned monospace table — all columns left-aligned. */
 function formatTable_(rows) {
   if (!rows.length) return '';
   const cols = rows[0].length;
@@ -258,9 +255,8 @@ function formatTable_(rows) {
   }
   return rows.map(function(r) {
     return r.map(function(v, i) {
-      const s = String(v == null ? '' : v);
-      return i === 0 ? padR_(s, widths[i]) : padL_(s, widths[i]);
-    }).join('  ');
+      return padR_(String(v == null ? '' : v), widths[i]);
+    }).join('    ');
   }).join('\n');
 }
 
