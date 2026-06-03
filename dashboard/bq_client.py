@@ -154,13 +154,37 @@ def get_monthly(streamer_ids=None):
 
 
 def get_platform_compare():
+    """Per-match platform metrics joined with our BDW metrics from sessions.
+
+    Returns one row per (date, match_id) with both our and platform-side
+    columns populated. Matches we didn't stream get 0 on the our_* side.
+    """
     key = 'platform'
     if key in _cache:
         return _cache[key]
-    df = _query(f"""
+    plat = _query(f"""
         SELECT *
         FROM `{DATASET}.agg_match_platform_compare`
-        ORDER BY KickOffTime
+        ORDER BY date, match_id
     """)
+    sess = _full_session()
+
+    ours = (
+        sess.dropna(subset=['SabaMatchId'])
+        .groupby('SabaMatchId', as_index=False)
+        .agg(
+            our_bdw_bet_count=('bdw_bet_count', 'sum'),
+            our_bdw_turnover_rm=('bdw_turnover_rm', 'sum'),
+            our_match_stage=('match_stage', 'first'),
+            our_kickoff=('KickOffTime', 'first'),
+        )
+    )
+    ours['SabaMatchId'] = ours['SabaMatchId'].astype('Int64')
+    plat['match_id'] = plat['match_id'].astype('Int64')
+
+    df = plat.merge(ours, left_on='match_id', right_on='SabaMatchId', how='left')
+    df['our_bdw_bet_count'] = df['our_bdw_bet_count'].fillna(0)
+    df['our_bdw_turnover_rm'] = df['our_bdw_turnover_rm'].fillna(0)
+    df['our_avg_bet_size_rm'] = df['our_bdw_turnover_rm'] / df['our_bdw_bet_count'].replace(0, pd.NA)
     _cache.set(key, df, expire=3600)
     return df

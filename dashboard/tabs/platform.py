@@ -1,80 +1,129 @@
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 from dash import dash_table, dcc, html
 import dash_bootstrap_components as dbc
+import plotly.express as px
+import plotly.graph_objects as go
 
 
-def _scope_b_cards(df):
-    if df.empty:
-        return html.Div()
-    row = df.iloc[0]
-
-    def card(label, value, fmt='rm'):
-        if pd.isna(value):
-            display = 'n/a'
-        elif fmt == 'rm':
-            display = f'RM {value:,.0f}'
-        elif fmt == 'pct':
-            display = f'{value:.1%}'
-        else:
-            display = f'{value:,.0f}'
-        return dbc.Col(
-            dbc.Card(dbc.CardBody([
-                html.P(label, className='text-muted mb-1', style={'fontSize': '0.8rem'}),
-                html.H5(display, className='mb-0'),
-            ]), className='text-center'),
-            width=3,
-        )
-
-    return dbc.Row([
-        card('Our Season BDW Turnover', row.get('our_season_bdw_turnover_rm'), 'rm'),
-        card('Platform Season Turnover', row.get('platform_season_bet_turnover_rm'), 'rm'),
-        card('Season Share of Wallet', row.get('season_share_of_wallet'), 'pct'),
-        card('Season Share of Bets', row.get('season_share_of_bets'), 'pct'),
-    ], className='g-2 mb-3')
-
-
-def _scope_a_chart(df):
-    if df.empty:
-        return dcc.Graph(figure=go.Figure())
-    df = df.copy()
-    df['match_label'] = df.apply(
-        lambda r: f"{r.get('HomeCnName','?')} v {r.get('AwayCnName','?')}", axis=1
-    )
-    df = df.sort_values('KickOffTime')
-    fig = px.bar(
-        df, x='match_label', y='match_share_of_wallet',
-        labels={'match_label': 'Match', 'match_share_of_wallet': 'Share of Wallet'},
-        title='Per-Match Share of Wallet (BDW Turnover / Platform Turnover)',
-    )
-    fig.update_layout(xaxis_tickangle=-45, margin=dict(t=40, b=120))
-    return dcc.Graph(figure=fig)
-
-
-_TABLE_COLS = [
-    'HomeCnName', 'AwayCnName', 'KickOffTime',
-    'our_bdw_bet_count', 'our_bdw_turnover_rm', 'our_avg_bet_size_rm',
-    'platform_bet_count', 'platform_bet_turnover_rm', 'platform_avg_bet_size_rm',
-    'match_share_of_wallet', 'match_share_of_bets',
+# Three comparison views.
+# Each view is: filter on the per-match dataframe + a "their" turnover/count/user
+# column triplet to compare our BDW against.
+VIEWS = [
+    {
+        'key': 'match_streamer_site_streamer',
+        'title': '1. Matches with streamer × Sites with streamer',
+        'subtitle': 'Our BDW vs general bet metrics from sites that host the streamer function',
+        'filter': lambda df: df[df['has_streamer'] == True],
+        'their_turnover': 'streamer_site_total_turnover',
+        'their_count':    'streamer_site_total_bet_count',
+        'their_user':     'streamer_site_bet_user',
+        'their_avg':      'streamer_site_avg_bet_size',
+    },
+    {
+        'key': 'match_streamer_all_site',
+        'title': '2. Matches with streamer × All sites',
+        'subtitle': 'Our BDW vs all-site bet metrics, restricted to matches that have a streamer',
+        'filter': lambda df: df[df['has_streamer'] == True],
+        'their_turnover': 'overall_total_turnover',
+        'their_count':    'overall_total_bet_count',
+        'their_user':     'overall_bet_user',
+        'their_avg':      'overall_avg_bet_size_per_ticket',
+    },
+    {
+        'key': 'all_matches_all_site',
+        'title': '3. All matches × All sites',
+        'subtitle': 'Our BDW vs all-site bet metrics across every match in the period',
+        'filter': lambda df: df,
+        'their_turnover': 'overall_total_turnover',
+        'their_count':    'overall_total_bet_count',
+        'their_user':     'overall_bet_user',
+        'their_avg':      'overall_avg_bet_size_per_ticket',
+    },
 ]
 
 
-def _scope_a_table(df):
-    cols_present = [c for c in _TABLE_COLS if c in df.columns]
+def _card(label, value, fmt='rm'):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        display = 'n/a'
+    elif fmt == 'rm':
+        display = f'RM {value:,.0f}'
+    elif fmt == 'usd':
+        display = f'USD {value:,.0f}'
+    elif fmt == 'pct':
+        display = f'{value:.2%}'
+    elif fmt == 'int':
+        display = f'{value:,.0f}'
+    else:
+        display = str(value)
+    return dbc.Col(
+        dbc.Card(dbc.CardBody([
+            html.P(label, className='text-muted mb-1', style={'fontSize': '0.75rem'}),
+            html.H6(display, className='mb-0'),
+        ]), className='text-center'),
+        width=2,
+    )
+
+
+def _period_cards(sub, v):
+    our_to = sub['our_bdw_turnover_rm'].sum()
+    our_bc = sub['our_bdw_bet_count'].sum()
+    their_to = sub[v['their_turnover']].sum()
+    their_bc = sub[v['their_count']].sum()
+    their_users = sub[v['their_user']].sum()
+    sow = our_to / their_to if their_to else None
+    sob = our_bc / their_bc if their_bc else None
+    return dbc.Row([
+        _card('Our BDW Turnover', our_to, 'rm'),
+        _card('Platform Turnover', their_to, 'rm'),
+        _card('Share of Wallet', sow, 'pct'),
+        _card('Our BDW Bet Count', our_bc, 'int'),
+        _card('Platform Bet Count', their_bc, 'int'),
+        _card('Share of Bets', sob, 'pct'),
+    ], className='g-2 mb-2')
+
+
+_MATCH_COL_DEFS = [
+    ('date',                  'Date',            None),
+    ('match_id',              'Match ID',        None),
+    ('match_name',            'Match',           None),
+    ('has_streamer',          'Streamer?',       None),
+    ('our_bdw_turnover_rm',   'Our BDW (RM)',    ',.0f'),
+    ('our_bdw_bet_count',     'Our BDW Bets',    ',.0f'),
+    ('their_turnover',        'Plat Turnover',   ',.0f'),
+    ('their_count',           'Plat Bets',       ',.0f'),
+    ('their_user',            'Plat Users',      ',.0f'),
+    ('share_of_wallet',       'Share of Wallet', '.2%'),
+    ('share_of_bets',         'Share of Bets',   '.2%'),
+]
+
+
+def _match_table(sub, v):
+    df = sub.copy()
+    df['their_turnover'] = df[v['their_turnover']]
+    df['their_count']    = df[v['their_count']]
+    df['their_user']     = df[v['their_user']]
+    df['share_of_wallet'] = df['our_bdw_turnover_rm'] / df['their_turnover'].replace(0, pd.NA)
+    df['share_of_bets']   = df['our_bdw_bet_count']   / df['their_count'].replace(0, pd.NA)
+    df = df.sort_values(['date', 'our_bdw_turnover_rm'], ascending=[False, False])
+
     cols_def = []
-    for c in cols_present:
-        if df[c].dtype in ['float64', 'int64']:
-            cols_def.append({'name': c, 'id': c, 'type': 'numeric',
-                             'format': {'specifier': ',.2f'}})
-        else:
-            cols_def.append({'name': c, 'id': c})
+    data_cols = []
+    for col, label, spec in _MATCH_COL_DEFS:
+        if col not in df.columns:
+            continue
+        data_cols.append(col)
+        d = {'name': label, 'id': col}
+        if spec:
+            d['type'] = 'numeric'
+            d['format'] = {'specifier': spec}
+        cols_def.append(d)
 
     return dash_table.DataTable(
-        data=df[cols_present].to_dict('records'),
+        data=df[data_cols].to_dict('records'),
         columns=cols_def,
         sort_action='native',
-        page_size=20,
+        filter_action='native',
+        page_size=15,
         style_table={'overflowX': 'auto'},
         style_cell={'fontSize': '12px', 'padding': '4px 8px'},
         style_header={'fontWeight': 'bold', 'backgroundColor': '#f8f9fa'},
@@ -84,14 +133,43 @@ def _scope_a_table(df):
     )
 
 
+def _sow_chart(sub, v, title):
+    df = sub.copy()
+    df['share_of_wallet'] = df['our_bdw_turnover_rm'] / df[v['their_turnover']].replace(0, pd.NA)
+    df = df.dropna(subset=['share_of_wallet']).sort_values('date')
+    if df.empty:
+        return dcc.Graph(figure=go.Figure())
+    df['match_label'] = df['match_name'].fillna(df['match_id'].astype(str))
+    fig = px.bar(
+        df, x='match_label', y='share_of_wallet',
+        labels={'match_label': 'Match', 'share_of_wallet': 'Share of Wallet'},
+        title=title,
+    )
+    fig.update_layout(xaxis_tickangle=-45, margin=dict(t=40, b=120), yaxis_tickformat='.1%')
+    return dcc.Graph(figure=fig)
+
+
+def _view_section(df, v):
+    sub = v['filter'](df)
+    if sub.empty:
+        return html.Div([
+            html.H6(v['title'], className='mt-3 mb-1'),
+            html.P(v['subtitle'], className='text-muted', style={'fontSize': '0.8rem'}),
+            html.Div('No matches in this scope.', className='text-muted'),
+        ])
+    return html.Div([
+        html.H6(v['title'], className='mt-3 mb-1'),
+        html.P(v['subtitle'], className='text-muted', style={'fontSize': '0.8rem'}),
+        html.Small('Period Total', className='text-muted'),
+        _period_cards(sub, v),
+        _sow_chart(sub, v, 'Share of Wallet per Match'),
+        html.Small('Match-by-match', className='text-muted'),
+        _match_table(sub, v),
+        html.Hr(),
+    ])
+
+
 def render(df):
     if df is None or df.empty:
         return html.Div('No platform comparison data available.', className='text-muted p-3')
-    return html.Div([
-        html.H6('Season Aggregate (Scope B)', className='mb-2'),
-        _scope_b_cards(df),
-        html.Hr(),
-        html.H6('Per-Match Comparison (Scope A)', className='mt-3 mb-2'),
-        _scope_a_chart(df),
-        _scope_a_table(df),
-    ])
+    return html.Div([_view_section(df, v) for v in VIEWS])
