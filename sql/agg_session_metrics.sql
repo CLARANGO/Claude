@@ -238,6 +238,7 @@ SELECT
   s.wheel_count,
   -- L2 — bet during watch count + watch
   s.bdw_bet_count,
+  s.bdw_user_count,
   s.watch_min_total,
   s.viewers,
   s.watch_over_10min_user,
