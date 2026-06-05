@@ -26,7 +26,14 @@ const CONFIG = {
   WEEKLY_TAB:  'agg_streamer_weekly',
   MATCH_COMPARE_TAB: 'agg_match_platform_compare',
   LOG_TAB: 'Alert Log',
+  SNAPSHOT_TAB: 'Data Snapshot',
   TIMEZONE: 'Asia/Taipei',
+
+  // Site column convention: 'All site' = aggregated across sites; specific
+  // site name = single-site row. Daily uses per-site rows; weekly uses
+  // only 'All site' rows. Daily baselines (last 2 / May avg) are filtered
+  // to the same (streamer, site) pool — don't mix sites.
+  ALL_SITE_LABEL: 'All site',
 
   // The 6 [ALERT] KPIs (per revised metrics tree). Order = how they appear in the digest.
   KPIS: [
@@ -38,15 +45,18 @@ const CONFIG = {
     { col: 'bdw_bet_count',                    label: 'Bet During Watch Count (L2)',       fmt: 'int' },
   ],
 
-  // Daily per-match table — the 6 alert KPIs PLUS PCU. PCU uses 'max' aggregation
-  // when rolled up (peak); the 6 KPIs use sum. avg-per-match uses simple mean.
+  // Daily per-match table + weekly KPI table. 'sum' aggs total via SUM, 'max' via MAX,
+  // 'rate' is rateNum/rateDen (weighted across the pool for totals, mean for avg/match).
   DISPLAY_METRICS: [
     { col: 'follow_streamer_bet_count',        label: 'Follow Streamer Bet Count',    fmt: 'int', agg: 'sum' },
     { col: 'bdw_turnover_rm',                  label: 'Bet During Watch Turnover',    fmt: 'rm',  agg: 'sum' },
     { col: 'donation_amount_usd',              label: 'Donation Amount',              fmt: 'usd', agg: 'sum' },
     { col: 'follow_streamer_bet_turnover_rm',  label: 'Follow Streamer Bet Turnover', fmt: 'rm',  agg: 'sum' },
+    { col: 'follow_user_count',                label: 'Follow Bet User',              fmt: 'int', agg: 'sum' },
     { col: 'donation_user_count',              label: 'Donation User Count',          fmt: 'int', agg: 'sum' },
     { col: 'bdw_bet_count',                    label: 'Bet During Watch Count',       fmt: 'int', agg: 'sum' },
+    { col: 'during_watch_user_rate',           label: 'BDW User Rate',                fmt: 'pct', agg: 'rate',
+      rateNum: 'bdw_user_count', rateDen: 'viewers' },
     { col: 'pcu',                              label: 'PCU',                          fmt: 'int', agg: 'max' },
   ],
 
@@ -85,6 +95,13 @@ const CONFIG = {
 
   // Streamer-absent: was active in last N days, didn't stream yesterday
   ABSENT_LOOKBACK_DAYS: 3,
+
+  // Data-revision drift alert: each run snapshots the last N days of
+  // per-(stream, site) KPI values. If a previously-snapshotted day's value
+  // changes ≥ DRIFT_THRESHOLD on a later run, fire a revision alert.
+  DRIFT_THRESHOLD: 0.10,
+  SNAPSHOT_LOOKBACK_DAYS: 7,
+  SNAPSHOT_RETENTION_DAYS: 14,
 };
 
 // ============================================================
@@ -101,6 +118,12 @@ function runDaily() {
     postSlack_('No data found in `' + CONFIG.SESSION_TAB + '` tab — skipping today.');
     return;
   }
+
+  // Drift check first — compare current values against the prior snapshot of
+  // the same data dates. Catches the case where the 12pm refresh silently
+  // revised yesterday's numbers.
+  const drift = evaluateDrift_(ss, sessions);
+  if (drift.length) postDriftAlerts_(drift);
 
   const alerts = evaluateAlerts_(sessions, yesterday);
   const digest = buildDigest_(sessions, yesterday, alerts);
@@ -123,6 +146,11 @@ function runDaily() {
     const weekReport = buildWeeklyDigest_(sessions, weekRange.start, weekRange.end);
     postSlack_(weekReport);
   }
+
+  // Snapshot last N days AFTER drift check so we capture today's read for
+  // tomorrow's comparison.
+  snapshotMetrics_(ss, sessions);
+  pruneSnapshot_(ss);
 }
 
 /** Test helper — posts a sample daily digest, no thread. */
@@ -168,9 +196,10 @@ function testSlack() {
 // ============================================================
 
 function buildDigest_(sessions, yesterday, alerts) {
-  // One stream session = one streamer covering one match.
+  // Daily uses per-site rows only — exclude the 'All site' aggregate so each
+  // (match, site) gets its own block with same-site baselines.
   const yest = sessions.filter(function(r) {
-    return formatDate_(r.day) === yesterday;
+    return formatDate_(r.day) === yesterday && (r.site || '') !== CONFIG.ALL_SITE_LABEL;
   });
   yest.sort(function(a, b) {
     return (Number(b.follow_streamer_bet_count) || 0) - (Number(a.follow_streamer_bet_count) || 0);
@@ -178,10 +207,12 @@ function buildDigest_(sessions, yesterday, alerts) {
 
   const matchBlocks = yest.map(function(s) { return buildMatchBlock_(sessions, s); });
   const alertSummary = summarizeAlerts_(alerts);
+  const matchCount = distinct_(yest, 'stream_id').length;
 
   return '*📊 World Cup Dashboard — ' + yesterday + '*\n' +
-    '_' + yest.length + ' matches · ' +
-      distinct_(yest, 'streamer_id').length + ' streamers_\n\n' +
+    '_' + matchCount + ' matches · ' +
+      distinct_(yest, 'streamer_id').length + ' streamers · ' +
+      yest.length + ' per-site rows_\n\n' +
     (matchBlocks.length ? matchBlocks.join('\n\n') : '_No matches yesterday._') +
     '\n\n' + alertSummary;
 }
@@ -193,36 +224,41 @@ function buildDigest_(sessions, yesterday, alerts) {
 function buildMatchBlock_(sessions, s) {
   const streamId = s.stream_id || s.SabaMatchId || 'n/a';
   const streamer = s.streamer || s.streamer_id || '?';
+  const site = s.site || 'unknown';
   const matchName = cleanStreamName_(s.stream_name || '');
   const stageKey = s.match_stage || 'n/a';
   const stageLabel = CONFIG.STAGE_LABELS[stageKey] || stageKey;
   const titleLine = stageLabel + (matchName ? ' — ' + matchName : '');
 
-  // Baseline 1 — streamer's own last 2 matches (any stage)
-  const last2 = sessions
-    .filter(function(p) {
-      return p.streamer_id === s.streamer_id && new Date(p.day) < new Date(s.day);
-    })
+  // Baseline pool: same streamer AND same site (don't mix sites). Also
+  // exclude 'All site' rows so we compare apples to apples.
+  const samePool = sessions.filter(function(p) {
+    return p.streamer_id === s.streamer_id &&
+           (p.site || '') === site &&
+           (p.site || '') !== CONFIG.ALL_SITE_LABEL;
+  });
+
+  // Baseline 1 — last 2 matches before this one
+  const last2 = samePool
+    .filter(function(p) { return new Date(p.day) < new Date(s.day); })
     .sort(function(a, b) { return new Date(a.day) - new Date(b.day); })
     .slice(-2);
 
-  // Baseline 2 — streamer's average over all May 2026 sessions
-  const may = sessions.filter(function(p) {
-    return p.streamer_id === s.streamer_id && extractMonth_(p.day) === 5;
-  });
+  // Baseline 2 — same-site May 2026 average
+  const may = samePool.filter(function(p) { return extractMonth_(p.day) === 5; });
 
   const rows = [['Metric', 'Value', 'vs Last 2', 'vs May Avg']];
   CONFIG.DISPLAY_METRICS.forEach(function(kpi) {
-    const v = Number(s[kpi.col]);
+    const v = valueForRow_(s, kpi);
     rows.push([
       kpi.label,
       isNaN(v) ? 'n/a' : formatVal_(v, kpi.fmt),
-      arrowDelta_(v, avgOf_(last2, kpi.col)),
-      arrowDelta_(v, avgOf_(may, kpi.col)),
+      arrowDelta_(v, avgForKpi_(last2, kpi)),
+      arrowDelta_(v, avgForKpi_(may, kpi)),
     ]);
   });
 
-  return '*⚽ Match ' + streamId + ' · ' + streamer + '*\n' +
+  return '*⚽ Match ' + streamId + ' · ' + streamer + ' · ' + site + '*\n' +
     '_' + titleLine + '_\n' +
     '```\n' + formatTable_(rows, [1]) + '\n```';
 }
@@ -233,6 +269,47 @@ function avgOf_(rows, col) {
   const vals = rows.map(function(r) { return Number(r[col]); }).filter(function(n) { return !isNaN(n); });
   if (!vals.length) return 0;
   return vals.reduce(function(a, x) { return a + x; }, 0) / vals.length;
+}
+
+/** Resolve a single-row value for a KPI (handles 'rate' agg). */
+function valueForRow_(row, kpi) {
+  if (kpi.agg === 'rate') {
+    const num = Number(row[kpi.rateNum]) || 0;
+    const den = Number(row[kpi.rateDen]) || 0;
+    return den > 0 ? num / den : NaN;
+  }
+  return Number(row[kpi.col]);
+}
+
+/** Total of a KPI across rows. Sum for 'sum', max for 'max', weighted ratio for 'rate'. */
+function totalForKpi_(rows, kpi) {
+  if (!rows || !rows.length) return 0;
+  if (kpi.agg === 'rate') {
+    const num = sum_(rows, kpi.rateNum);
+    const den = sum_(rows, kpi.rateDen);
+    return den > 0 ? num / den : 0;
+  }
+  if (kpi.agg === 'max') {
+    const vals = rows.map(function(r) { return Number(r[kpi.col]) || 0; });
+    return vals.length ? Math.max.apply(null, vals) : 0;
+  }
+  return sum_(rows, kpi.col);
+}
+
+/** Mean of per-row KPI values (used for daily baselines + per-match avgs). */
+function avgForKpi_(rows, kpi) {
+  if (!rows || !rows.length) return 0;
+  const vals = rows.map(function(r) { return valueForRow_(r, kpi); })
+                   .filter(function(v) { return !isNaN(v); });
+  if (!vals.length) return 0;
+  return vals.reduce(function(a, x) { return a + x; }, 0) / vals.length;
+}
+
+/** Avg/Match for the weekly table — sum agg divides total by matchCount, others mean. */
+function avgPerMatchForKpi_(rows, kpi, matchCount) {
+  if (!matchCount) return 0;
+  if (kpi.agg === 'sum') return totalForKpi_(rows, kpi) / matchCount;
+  return avgForKpi_(rows, kpi);
 }
 
 /** Return colored delta indicator: '🟢 ▲ N%' / '🔴 ▼ N%' / 'n/a'. */
@@ -290,17 +367,21 @@ function extractMonth_(dayVal) {
 // ============================================================
 
 function buildWeeklyDigest_(sessions, weekStart, weekEnd) {
-  const weekSessions = sessions.filter(function(r) {
+  // Weekly uses only the 'All site' aggregate rows (no per-site detail).
+  const allSiteSessions = sessions.filter(function(r) {
+    return (r.site || '') === CONFIG.ALL_SITE_LABEL;
+  });
+  const weekSessions = allSiteSessions.filter(function(r) {
     const d = formatDate_(r.day);
     return d >= weekStart && d <= weekEnd;
   });
   const matchCount = distinct_(weekSessions, 'stream_id').length;
 
   // Combined KPI table: Metric / Total / Δ vs prior weeks / Avg per Match / Δ vs prior weeks per-match
-  const kpiTable = buildCombinedKpiTable_(sessions, weekSessions, weekStart, matchCount);
+  const kpiTable = buildCombinedKpiTable_(allSiteSessions, weekSessions, weekStart, matchCount);
 
   // Per-language blocks — same combined table format, scoped to one language
-  const langBlocks = buildLanguageBlocks_(sessions, weekSessions, weekStart);
+  const langBlocks = buildLanguageBlocks_(allSiteSessions, weekSessions, weekStart);
 
   // 4) Top 5 streamers
   const byStreamer = groupAndSum_(weekSessions, 'streamer_id', ['follow_streamer_bet_count', 'bdw_turnover_rm', 'donation_amount_usd']);
@@ -354,12 +435,10 @@ function buildCombinedKpiTable_(allSessions, weekSessions, weekStart, matchCount
     'vs prior weeks avg/match',
   ]];
   CONFIG.DISPLAY_METRICS.forEach(function(kpi) {
-    const total = aggregate_(weekSessions, kpi.col, kpi.agg);
-    const baselineTotal = cumulativePriorWeeksAvg_(allSessions, weekStart, kpi.col);
-    const avgPerMatch = matchCount > 0
-      ? (kpi.agg === 'max' ? aggregate_(weekSessions, kpi.col, 'avg') : total / matchCount)
-      : 0;
-    const baselineAvg = priorWeeksPerMatchAvg_(allSessions, weekStart, kpi.col);
+    const total = totalForKpi_(weekSessions, kpi);
+    const baselineTotal = cumulativePriorWeeksAvg_(allSessions, weekStart, kpi);
+    const avgPerMatch = avgPerMatchForKpi_(weekSessions, kpi, matchCount);
+    const baselineAvg = priorWeeksPerMatchAvg_(allSessions, weekStart, kpi);
     rows.push([
       kpi.label,
       formatVal_(total, kpi.fmt),
@@ -401,22 +480,23 @@ function buildLanguageBlocks_(sessions, weekSessions, weekStart) {
   });
 }
 
-/** Average of (weekly metric / weekly match count) across all complete prior weeks. */
-function priorWeeksPerMatchAvg_(sessions, weekStart, col) {
+/** Average of (per-match KPI value) across all complete prior weeks. */
+function priorWeeksPerMatchAvg_(sessions, weekStart, kpi) {
   const perWeek = {};
   sessions.forEach(function(r) {
     if (formatDate_(r.day) >= weekStart) return;
     const w = isoWeekStart_(r.day);
-    if (!perWeek[w]) perWeek[w] = { total: 0, count: 0 };
-    perWeek[w].total += (Number(r[col]) || 0);
-    perWeek[w].count += 1;   // 1 stream row = 1 match
+    if (!perWeek[w]) perWeek[w] = [];
+    perWeek[w].push(r);
   });
   const weeks = Object.keys(perWeek);
   if (!weeks.length) return 0;
-  const avgs = weeks.map(function(w) {
-    return perWeek[w].count > 0 ? perWeek[w].total / perWeek[w].count : 0;
+  const weekAvgs = weeks.map(function(w) {
+    const wkRows = perWeek[w];
+    const matchCount = distinct_(wkRows, 'stream_id').length;
+    return avgPerMatchForKpi_(wkRows, kpi, matchCount);
   });
-  return avgs.reduce(function(a, x) { return a + x; }, 0) / avgs.length;
+  return weekAvgs.reduce(function(a, x) { return a + x; }, 0) / weekAvgs.length;
 }
 
 function summarizeAlerts_(alerts) {
@@ -701,12 +781,13 @@ function formatDate_(v) {
 }
 
 function formatVal_(v, fmt) {
-  if (v == null || v === '') return '—';
+  if (v == null || v === '' || (typeof v === 'number' && isNaN(v))) return '—';
   if (fmt === 'rm')  return 'RM '  + Math.round(Number(v)).toLocaleString();
   if (fmt === 'usd') return 'USD ' + Math.round(Number(v)).toLocaleString();
   // Back-compat: 'money' falls through to USD.
   if (fmt === 'money') return 'USD ' + Math.round(Number(v)).toLocaleString();
   if (fmt === 'int') return Math.round(Number(v)).toLocaleString();
+  if (fmt === 'pct') return (Number(v) * 100).toFixed(1) + '%';
   return String(v);
 }
 
@@ -717,18 +798,19 @@ function padL_(s, n) { s = String(s); return s.length >= n ? s : ' '.repeat(n - 
 // Weekly helpers
 // ============================================================
 
-/** Average weekly total of `col` across all complete ISO weeks before weekStart. */
-function cumulativePriorWeeksAvg_(sessions, weekStart, col) {
-  const weekTotals = {};
+/** Average weekly KPI total across all complete ISO weeks before weekStart. */
+function cumulativePriorWeeksAvg_(sessions, weekStart, kpi) {
+  const perWeek = {};
   sessions.forEach(function(r) {
     if (formatDate_(r.day) >= weekStart) return;
-    const wStart = isoWeekStart_(r.day);
-    if (!weekTotals[wStart]) weekTotals[wStart] = 0;
-    weekTotals[wStart] += (Number(r[col]) || 0);
+    const w = isoWeekStart_(r.day);
+    if (!perWeek[w]) perWeek[w] = [];
+    perWeek[w].push(r);
   });
-  const weeks = Object.keys(weekTotals);
+  const weeks = Object.keys(perWeek);
   if (!weeks.length) return 0;
-  return weeks.reduce(function(s, w) { return s + weekTotals[w]; }, 0) / weeks.length;
+  const weekTotals = weeks.map(function(w) { return totalForKpi_(perWeek[w], kpi); });
+  return weekTotals.reduce(function(a, x) { return a + x; }, 0) / weekTotals.length;
 }
 
 /** ISO week Monday as 'yyyy-MM-dd' for any day value (Date or string). */
@@ -772,3 +854,158 @@ function weekDateLabel_(start, end) {
 }
 
 function pad2_(n) { return n < 10 ? '0' + n : '' + n; }
+
+function todayInTz_(tz) {
+  return Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+}
+
+/** List of last N day-strings ending at yesterday (inclusive). */
+function lastNDays_(n) {
+  const out = [];
+  const now = new Date();
+  for (let i = 1; i <= n; i++) {
+    const d = new Date(now.getTime());
+    d.setDate(now.getDate() - i);
+    out.push(Utilities.formatDate(d, CONFIG.TIMEZONE, 'yyyy-MM-dd'));
+  }
+  return out;
+}
+
+// ============================================================
+// Snapshot + data-revision drift alerts
+// ============================================================
+
+/**
+ * Append a snapshot row per (stream_id, site) for each day in the last
+ * SNAPSHOT_LOOKBACK_DAYS window. Tomorrow's run reads these to detect
+ * whether the daily refresh silently revised the numbers.
+ */
+function snapshotMetrics_(ss, sessions) {
+  const dates = lastNDays_(CONFIG.SNAPSHOT_LOOKBACK_DAYS);
+  const dateSet = {};
+  dates.forEach(function(d) { dateSet[d] = true; });
+  const rows = sessions.filter(function(r) { return dateSet[formatDate_(r.day)]; });
+  if (!rows.length) return;
+
+  let tab = ss.getSheetByName(CONFIG.SNAPSHOT_TAB);
+  if (!tab) tab = ss.insertSheet(CONFIG.SNAPSHOT_TAB);
+  if (tab.getLastRow() === 0) {
+    const header = ['report_date', 'data_date', 'streamer_id', 'streamer', 'stream_id', 'site'];
+    CONFIG.DISPLAY_METRICS.forEach(function(kpi) { header.push(kpi.col); });
+    tab.appendRow(header);
+  }
+  const today = todayInTz_(CONFIG.TIMEZONE);
+  const out = rows.map(function(s) {
+    const row = [today, formatDate_(s.day), s.streamer_id || '', s.streamer || '',
+                 s.stream_id || '', s.site || ''];
+    CONFIG.DISPLAY_METRICS.forEach(function(kpi) {
+      const v = valueForRow_(s, kpi);
+      row.push(isNaN(v) ? '' : v);
+    });
+    return row;
+  });
+  tab.getRange(tab.getLastRow() + 1, 1, out.length, out[0].length).setValues(out);
+}
+
+/** Drop snapshot rows older than SNAPSHOT_RETENTION_DAYS to keep the tab compact. */
+function pruneSnapshot_(ss) {
+  const tab = ss.getSheetByName(CONFIG.SNAPSHOT_TAB);
+  if (!tab || tab.getLastRow() < 2) return;
+  const values = tab.getDataRange().getValues();
+  const header = values[0];
+  const idx = header.indexOf('report_date');
+  if (idx < 0) return;
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - CONFIG.SNAPSHOT_RETENTION_DAYS);
+  const keep = [header];
+  for (let i = 1; i < values.length; i++) {
+    const rd = new Date(values[i][idx]);
+    if (!isNaN(rd) && rd >= cutoff) keep.push(values[i]);
+  }
+  if (keep.length === values.length) return;
+  tab.clear();
+  tab.getRange(1, 1, keep.length, keep[0].length).setValues(keep);
+}
+
+/**
+ * Compare current sheet values against the most recent prior snapshot for
+ * the same (stream_id, site, data_date). Flag any KPI whose value moved
+ * ≥ DRIFT_THRESHOLD between snapshots — that's a silent data revision.
+ */
+function evaluateDrift_(ss, sessions) {
+  const tab = ss.getSheetByName(CONFIG.SNAPSHOT_TAB);
+  if (!tab || tab.getLastRow() < 2) return [];
+  const values = tab.getDataRange().getValues();
+  const header = values[0];
+  const idx = {};
+  header.forEach(function(h, i) { idx[h] = i; });
+
+  const today = todayInTz_(CONFIG.TIMEZONE);
+  // Group prior snapshots by (stream_id, site, data_date) — keep most recent BEFORE today.
+  const priorByKey = {};
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    const reportDate = formatDate_(row[idx['report_date']]);
+    if (reportDate >= today) continue;
+    const key = row[idx['stream_id']] + '|' + (row[idx['site']] || '') + '|' + formatDate_(row[idx['data_date']]);
+    const existing = priorByKey[key];
+    if (!existing || formatDate_(row[idx['report_date']]) > formatDate_(existing[idx['report_date']])) {
+      priorByKey[key] = row;
+    }
+  }
+  if (!Object.keys(priorByKey).length) return [];
+
+  const alerts = [];
+  sessions.forEach(function(cur) {
+    const day = formatDate_(cur.day);
+    const key = (cur.stream_id || '') + '|' + (cur.site || '') + '|' + day;
+    const prior = priorByKey[key];
+    if (!prior) return;
+    CONFIG.DISPLAY_METRICS.forEach(function(kpi) {
+      const before = Number(prior[idx[kpi.col]]);
+      const after  = valueForRow_(cur, kpi);
+      if (!before || isNaN(before) || isNaN(after)) return;
+      const delta = (after - before) / before;
+      if (Math.abs(delta) < CONFIG.DRIFT_THRESHOLD) return;
+      alerts.push({
+        data_date: day,
+        stream_id: cur.stream_id,
+        streamer: cur.streamer,
+        site: cur.site,
+        kpi: kpi.label,
+        fmt: kpi.fmt,
+        before: before,
+        after: after,
+        delta: delta,
+      });
+    });
+  });
+  return alerts;
+}
+
+function postDriftAlerts_(alerts) {
+  if (!alerts.length) return;
+  // Group by data_date for readability.
+  const byDate = {};
+  alerts.forEach(function(a) {
+    if (!byDate[a.data_date]) byDate[a.data_date] = [];
+    byDate[a.data_date].push(a);
+  });
+  const dates = Object.keys(byDate).sort();
+  const blocks = dates.map(function(d) {
+    const lines = byDate[d].slice(0, 20).map(function(a) {
+      const dir = a.delta >= 0 ? '🟢 ▲' : '🔴 ▼';
+      const pct = (Math.abs(a.delta) * 100).toFixed(0) + '%';
+      return '• ' + (a.streamer || '?') + ' / ' + (a.site || '?') +
+             ' / *' + a.kpi + '*: ' +
+             formatVal_(a.before, a.fmt) + ' → ' + formatVal_(a.after, a.fmt) +
+             ' (' + dir + ' ' + pct + ')';
+    });
+    if (byDate[d].length > 20) lines.push('_…and ' + (byDate[d].length - 20) + ' more_');
+    return '*' + d + '*\n' + lines.join('\n');
+  });
+  const threshPct = (CONFIG.DRIFT_THRESHOLD * 100).toFixed(0);
+  postSlack_('*🔄 Data-revision alert*\n' +
+    alerts.length + ' KPI value(s) shifted ≥ ' + threshPct +
+    '% since the previous snapshot:\n\n' + blocks.join('\n\n'));
+}
