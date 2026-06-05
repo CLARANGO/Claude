@@ -53,6 +53,8 @@ const CONFIG = {
     { col: 'donation_amount_usd',              label: 'Donation Amount',              fmt: 'usd', agg: 'sum' },
     { col: 'follow_streamer_bet_turnover_rm',  label: 'Follow Streamer Bet Turnover', fmt: 'rm',  agg: 'sum' },
     { col: 'follow_user_count',                label: 'Follow Bet User',              fmt: 'int', agg: 'sum' },
+    { col: 'follow_bet_user_rate',             label: 'Follow Bet User Rate',         fmt: 'pct', agg: 'rate',
+      rateNum: 'follow_user_count', rateDen: 'bdw_user_count' },
     { col: 'donation_user_count',              label: 'Donation User Count',          fmt: 'int', agg: 'sum' },
     { col: 'bdw_bet_count',                    label: 'Bet During Watch Count',       fmt: 'int', agg: 'sum' },
     { col: 'during_watch_user_rate',           label: 'BDW User Rate',                fmt: 'pct', agg: 'rate',
@@ -196,10 +198,10 @@ function testSlack() {
 // ============================================================
 
 function buildDigest_(sessions, yesterday, alerts) {
-  // Daily uses per-site rows only — exclude the 'All site' aggregate so each
-  // (match, site) gets its own block with same-site baselines.
+  // All rows (including 'All site' aggregate). Baselines in buildMatchBlock_
+  // are scoped to the same (streamer, site) so sites are never mixed.
   const yest = sessions.filter(function(r) {
-    return formatDate_(r.day) === yesterday && (r.site || '') !== CONFIG.ALL_SITE_LABEL;
+    return formatDate_(r.day) === yesterday;
   });
   yest.sort(function(a, b) {
     return (Number(b.follow_streamer_bet_count) || 0) - (Number(a.follow_streamer_bet_count) || 0);
