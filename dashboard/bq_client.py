@@ -41,8 +41,9 @@ def _full_session():
     df = _query(f"""
         SELECT
             stream_id, streamer_id, streamer, stream_name, day, start_ts, end_ts,
-            stream_type, language, site, currency,
-            SabaMatchId, KickOffTime, time_slot_taipei, day_of_week, match_stage,
+            stream_type, language, site, stream_site_id, currency,
+            match_id AS SabaMatchId, match_shared,
+            KickOffTime, time_slot_taipei, day_of_week, match_stage,
             {', '.join(AGG_COLS)},
             watch_min_per_viewer, pcu, chat_user, message_count
         FROM `{DATASET}.agg_session_metrics`

@@ -33,7 +33,7 @@ const CONFIG = {
   // site name = single-site row. Daily uses per-site rows; weekly uses
   // only 'All site' rows. Daily baselines (last 2 / May avg) are filtered
   // to the same (streamer, site) pool — don't mix sites.
-  ALL_SITE_LABEL: 'All site',
+  ALL_SITE_LABEL: 'All Site',
 
   // The 6 [ALERT] KPIs (per revised metrics tree). Order = how they appear in the digest.
   KPIS: [

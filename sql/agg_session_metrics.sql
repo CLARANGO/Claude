@@ -17,9 +17,14 @@ PARTITION BY day
 CLUSTER BY anchor_id, stream_id
 AS
 -- Region: asia-southeast1 (Singapore). Run with --location=asia-southeast1.
--- agg_session_metrics — one row per stream session
+-- agg_session_metrics — one row per (stream × effective_site)
 -- Source: nf-bifrost.livestream_dm.core_streaming_performance (cust_id × stream_id grain)
 -- PCU source: nf-bifrost.livestream_dm.fact_stream_viewship (joined on stream_id / anchor_id)
+--
+-- Site logic (per match Shared flag):
+--   • Shared match → 'All Site' row, aggregated across all customer sites.
+--   • Exclusive match → one row per stream × stream_site_id, restricted to
+--     customers whose site_id matches the stream's site_id.
 --
 -- Applies bq-filter-rules:
 --   is_lic=1, is_shared IS TRUE, is_cancelled IS FALSE, site_id != 99 (chatroom),
@@ -33,11 +38,66 @@ AS
 -- TODOs (resolve via Phase 0 probes):
 --   [Q3] World Cup filter string in match_info.League (likely 'WORLD CUP')
 
-WITH by_cust AS (
+WITH
+  -- Exclusive-stream site aliases — one row per (match, anchor, site).
+  match_exclusive_sites AS (
+    SELECT
+      a.SabaMatchId,
+      a.AnchorId,
+      a.SiteId,
+      CASE
+        WHEN COUNTIF(a.Alias IS NULL OR a.Alias = '') = 0 THEN
+          STRING_AGG(DISTINCT a.Alias, ', ' ORDER BY a.Alias)
+        ELSE STRING_AGG(DISTINCT b.site_name, ', ' ORDER BY b.site_name)
+      END AS site_label
+    FROM `nf-bifrost.LiveStreaming.match_info_exclusive` a
+    JOIN `nf-bifrost.dimension.site_name` b
+      ON a.SiteId = b.site_id
+    GROUP BY 1, 2, 3
+  ),
+
+  -- Match dim — World Cup filter + time-slot tag + 7-stage bracket + site-logic dims.
+  -- For Shared matches: stream_site_id is NULL and effective_site is 'All Site'.
+  -- For exclusive matches: one row per (SabaMatchId, AnchorId, stream_site_id).
+  match_dim AS (
+    SELECT
+      m.SabaMatchId,
+      m.AnchorId,
+      m.KickOffTime,
+      m.League,
+      m.LeagueGroup,
+      m.Shared,
+      sub.SiteId  AS stream_site_id,
+      CASE WHEN m.Shared THEN 'All Site' ELSE sub.site_label END AS effective_site,
+      CASE WHEN m.Shared THEN CAST(NULL AS INT64) ELSE sub.SiteId END AS effective_site_id,
+      CASE
+        WHEN EXTRACT(HOUR FROM m.KickOffTime) BETWEEN 0  AND 5  THEN 'late_night'
+        WHEN EXTRACT(HOUR FROM m.KickOffTime) BETWEEN 6  AND 11 THEN 'morning'
+        ELSE 'afternoon'
+      END AS time_slot_taipei,
+      EXTRACT(DAYOFWEEK FROM DATE(m.KickOffTime)) AS day_of_week,
+      CASE
+        WHEN DATE(m.KickOffTime) BETWEEN '2026-06-11' AND '2026-06-28' THEN 'group'
+        WHEN DATE(m.KickOffTime) BETWEEN '2026-06-29' AND '2026-07-04' THEN 'R32'
+        WHEN DATE(m.KickOffTime) BETWEEN '2026-07-05' AND '2026-07-08' THEN 'R16'
+        WHEN DATE(m.KickOffTime) BETWEEN '2026-07-10' AND '2026-07-12' THEN 'QF'
+        WHEN DATE(m.KickOffTime) BETWEEN '2026-07-15' AND '2026-07-16' THEN 'SF'
+        WHEN DATE(m.KickOffTime) = '2026-07-19' THEN '3rd_place'
+        WHEN DATE(m.KickOffTime) = '2026-07-20' THEN 'final'
+        ELSE 'other'
+      END AS match_stage
+    FROM `nf-bifrost.LiveStreaming.match_info` m
+    LEFT JOIN match_exclusive_sites sub
+      USING (SabaMatchId, AnchorId)
+    WHERE m.isCancelled = FALSE
+      -- TODO [Q3]: confirm exact World Cup string (likely 'WORLD CUP')
+      AND UPPER(m.League) LIKE '%WORLD CUP%'
+  ),
+
+  by_cust AS (
     SELECT
       csp.cust_id,
       csp.stream_id,
-      -- we use ANY_VALUE here just to pass the stream details through the customer level
       csp.anchor_id,
       csp.streamer,
       CASE
@@ -50,9 +110,12 @@ WITH by_cust AS (
       csp.stream_end_time   AS end_ts,
       DATE(csp.stream_start_date) AS day,
       csp.country           AS language,
-      csp.site,
       csp.currency,
       csp.supplier,
+      -- Site-logic dims (from match_dim, see below). Customers from the wrong
+      -- site for an exclusive match are filtered out by the JOIN's WHERE clause.
+      m.effective_site      AS site,
+      m.effective_site_id   AS site_id,
 
       -- Individual Flags
       MAX(IF(csp.follow_bet_count > 0, 1, 0)) AS is_follow_user,
@@ -66,11 +129,11 @@ WITH by_cust AS (
       SUM(csp.follow_bet_count)        AS follow_streamer_bet_count,
       SUM(csp.during_watch_member_to)  AS bdw_turnover_rm,
       SUM(csp.follow_member_to)        AS follow_streamer_bet_turnover_rm,
-      
+
       SUM(IFNULL(csp.tip_amount_rm, 0)
         + IFNULL(csp.box_amount_rm, 0)
         + IFNULL(csp.wheel_amount_rm, 0)) / 4.2 AS donation_amount_usd,
-      
+
       SUM(IFNULL(csp.tip_count, 0) + IFNULL(csp.box_count, 0) + IFNULL(csp.wheel_count, 0)) AS donation_count,
       SUM(csp.tip_amount_rm)  / 4.2    AS tip_amount_usd,
       SUM(csp.tip_count)               AS tip_count,
@@ -87,6 +150,10 @@ WITH by_cust AS (
       SUM(csp.watch_sec)               AS watch_sec_total,
       SUM(csp.message_count)           AS message_count
     FROM `nf-bifrost.livestream_dm.core_streaming_performance` csp
+    LEFT JOIN match_dim m
+      ON m.AnchorId = csp.anchor_id
+     AND m.KickOffTime BETWEEN TIMESTAMP_SUB(csp.stream_start_time, INTERVAL 1 HOUR)
+                          AND csp.stream_end_time
     WHERE csp.is_lic = 1
       AND csp.is_shared IS TRUE
       AND csp.is_cancelled IS FALSE
@@ -96,7 +163,15 @@ WITH by_cust AS (
       AND csp.streamer NOT LIKE 'ID_%'
       AND csp.currency != 'UUS' AND csp.currency_id != 20
       AND DATE(csp.stream_start_date) BETWEEN DATE '2026-06-01' AND DATE '2026-08-01'
-    GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14
+      -- Site logic:
+      --   • Shared match (or non-WC stream with no match info) → keep all customers,
+      --     site collapses to 'All Site'.
+      --   • Exclusive match → keep only customers whose site_id matches the
+      --     streaming site; one output row per stream × site.
+      AND (m.SabaMatchId IS NULL
+        OR m.Shared IS TRUE
+        OR csp.site_id = m.stream_site_id)
+    GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 ),
 
 by_stream AS (
@@ -112,6 +187,8 @@ by_stream AS (
       bc.day,
       bc.language,
       bc.supplier,
+      bc.site,
+      bc.site_id,
 
       -- NS
       SUM(bc.follow_streamer_bet_count) AS follow_streamer_bet_count,
@@ -144,27 +221,18 @@ by_stream AS (
       SUM(bc.is_watch_over_10min_user)  AS watch_over_10min_user,
       SUM(bc.is_chat_user)              AS chat_user,
       SUM(bc.message_count)             AS message_count,
-      
+
       -- PCU
       MAX(mcm.call_pcu)                 AS pcu
     FROM by_cust bc
     LEFT JOIN `nf-bifrost.livestream_dm.fact_stream_viewship` mcm
       ON  bc.stream_id = mcm.stream_id
       AND bc.anchor_id = mcm.anchor_id
-    GROUP BY 
-      bc.stream_id,
-      bc.anchor_id,
-      bc.streamer,
-      bc.stream_type,
-      bc.league_or_tag,
-      bc.stream_name,
-      bc.start_ts,
-      bc.end_ts,
-      bc.day,
-      bc.language,
-      bc.supplier
-)
-,
+    GROUP BY
+      bc.stream_id, bc.anchor_id, bc.streamer, bc.stream_type, bc.league_or_tag,
+      bc.stream_name, bc.start_ts, bc.end_ts, bc.day, bc.language, bc.supplier,
+      bc.site, bc.site_id
+  ),
 
   -- Streamer recommendations (L1 Recommend Bet Count)
   by_stream_recommend AS (
@@ -174,52 +242,27 @@ by_stream AS (
       SUM(cr.RecommendCount) AS recommend_bet_count
     FROM `nf-bifrost.LiveStreaming.chatroom_recommend` cr
     GROUP BY cr.AnchorId, cr.SabaMatchId
-  ),
-
-  -- Match dim — World Cup filter + time-slot tag + 7-stage bracket
-  match_dim AS (
-    SELECT
-      SabaMatchId,
-      AnchorId,
-      KickOffTime,
-      League,
-      LeagueGroup,
-      CASE
-        WHEN EXTRACT(HOUR FROM KickOffTime) BETWEEN 0  AND 5  THEN 'late_night'
-        WHEN EXTRACT(HOUR FROM KickOffTime) BETWEEN 6  AND 11 THEN 'morning'
-        ELSE 'afternoon'
-      END AS time_slot_taipei,
-      EXTRACT(DAYOFWEEK FROM DATE(KickOffTime)) AS day_of_week,
-      CASE
-        WHEN DATE(KickOffTime) BETWEEN '2026-06-11' AND '2026-06-28' THEN 'group'
-        WHEN DATE(KickOffTime) BETWEEN '2026-06-29' AND '2026-07-04' THEN 'R32'
-        WHEN DATE(KickOffTime) BETWEEN '2026-07-05' AND '2026-07-08' THEN 'R16'
-        WHEN DATE(KickOffTime) BETWEEN '2026-07-10' AND '2026-07-12' THEN 'QF'
-        WHEN DATE(KickOffTime) BETWEEN '2026-07-15' AND '2026-07-16' THEN 'SF'
-        WHEN DATE(KickOffTime) = '2026-07-19' THEN '3rd_place'
-        WHEN DATE(KickOffTime) = '2026-07-20' THEN 'final'
-        ELSE 'other'
-      END AS match_stage
-    FROM `nf-bifrost.LiveStreaming.match_info`
-    WHERE isCancelled = FALSE
-      -- TODO [Q3]: confirm exact World Cup string (likely 'WORLD CUP')
-    AND UPPER(League) LIKE '%WORLD CUP%'
   )
 
 SELECT
   s.day,
   s.stream_id,
-  s.anchor_id,
+  s.anchor_id            AS streamer_id,
   s.streamer,
   s.stream_name,
   s.start_ts,
   s.end_ts,
   s.stream_type,
   s.language,
+  s.site,
+  s.site_id              AS stream_site_id,
   -- Match info
+  m.SabaMatchId          AS match_id,
+  m.KickOffTime,
   m.time_slot_taipei,
   m.day_of_week,
   m.match_stage,
+  m.Shared               AS match_shared,
   -- NS
   s.follow_streamer_bet_count,
   s.bdw_turnover_rm,
@@ -254,6 +297,11 @@ FROM by_stream s
 LEFT JOIN match_dim m
   ON m.AnchorId = s.anchor_id
  AND m.KickOffTime BETWEEN TIMESTAMP_SUB(s.start_ts, INTERVAL 1 HOUR) AND s.end_ts
+ -- Re-attach the match's site dimension to the matching by_stream row:
+ -- shared/entertainment rows have site_id NULL on both sides; per-site rows
+ -- match on the streaming site_id.
+ AND ((s.site_id IS NULL AND m.stream_site_id IS NULL)
+      OR s.site_id = m.stream_site_id)
 LEFT JOIN by_stream_recommend r
   ON r.streamer_id = s.anchor_id
  AND r.SabaMatchId = m.SabaMatchId;
