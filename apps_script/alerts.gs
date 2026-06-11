@@ -243,8 +243,9 @@ function buildTopMatches_(yest, n) {
   const lines = sorted.map(function(s, i) {
     const streamer = s.streamer || s.anchor_id || '?';
     const site = s.stream_site || s.site || '';
+    const matchId = s.stream_id || s.SabaMatchId || 'n/a';
     const matchName = cleanStreamName_(s.stream_name || '');
-    return '  ' + (i + 1) + '. *' + streamer + '* (' + site + ')' +
+    return '  ' + (i + 1) + '. *' + streamer + '* (' + site + ') · Match ' + matchId +
            (matchName ? ' — ' + matchName : '') + '\n' +
            '     Follow Bets: ' + formatVal_(s.follow_streamer_bet_count, 'int') +
            ' · BDW: ' + formatVal_(s.bdw_turnover_rm, 'rm') +
@@ -466,15 +467,17 @@ function buildCombinedKpiTable_(allSessions, weekSessions, weekStart, matchCount
   const rows = [[
     'Metric',
     'Total',
-    'vs prior week avg',
+    'WoW',
     'Avg/Match',
-    'vs prior weeks avg/match',
+    'WoW (avg/match)',
   ]];
+  const prior = priorWeekSessions_(allSessions, weekStart);
+  const priorMatchCount = distinct_(prior, 'stream_id').length;
   CONFIG.DISPLAY_METRICS.forEach(function(kpi) {
     const total = totalForKpi_(weekSessions, kpi);
-    const baselineTotal = cumulativePriorWeeksAvg_(allSessions, weekStart, kpi);
     const avgPerMatch = avgPerMatchForKpi_(weekSessions, kpi, matchCount);
-    const baselineAvg = priorWeeksPerMatchAvg_(allSessions, weekStart, kpi);
+    const baselineTotal = totalForKpi_(prior, kpi);
+    const baselineAvg = avgPerMatchForKpi_(prior, kpi, priorMatchCount);
     rows.push([
       kpi.label,
       formatVal_(total, kpi.fmt),
@@ -485,6 +488,20 @@ function buildCombinedKpiTable_(allSessions, weekSessions, weekStart, matchCount
   });
   // Col 1 = Total (right), col 3 = Avg/Match (right); cols 2 and 4 are deltas (left)
   return formatTable_(rows, [1, 3]);
+}
+
+/** Sessions in the previous ISO week (Mon–Sun) before weekStart. */
+function priorWeekSessions_(sessions, weekStart) {
+  const p = weekStart.split('-');
+  const wsDate = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+  const priorStart = new Date(wsDate.getTime() - 7 * 86400000);
+  const priorEnd   = new Date(wsDate.getTime() - 86400000);
+  const priorStartStr = priorStart.getFullYear() + '-' + pad2_(priorStart.getMonth() + 1) + '-' + pad2_(priorStart.getDate());
+  const priorEndStr   = priorEnd.getFullYear()   + '-' + pad2_(priorEnd.getMonth()   + 1) + '-' + pad2_(priorEnd.getDate());
+  return sessions.filter(function(r) {
+    const d = formatDate_(r.day);
+    return d >= priorStartStr && d <= priorEndStr;
+  });
 }
 
 /**
@@ -622,27 +639,6 @@ function evaluateAlerts_(sessions, yesterday) {
         }
       });
     });
-  });
-
-  // Streamer-absent alerts
-  Object.keys(byStreamer).forEach(function(streamerId) {
-    const ses = byStreamer[streamerId];
-    const yestSessions = ses.filter(function(r) { return formatDate_(r.day) === yesterday; });
-    if (yestSessions.length > 0) return;
-    const recent = ses.filter(function(r) {
-      const daysAgo = (new Date(yesterday) - new Date(r.day)) / 86400000;
-      return daysAgo > 0 && daysAgo <= CONFIG.ABSENT_LOOKBACK_DAYS;
-    });
-    if (recent.length === 0) return;
-    const last = ses[ses.length - 1];
-    alerts.push(makeAlert_({
-      date: yesterday, type: 'absent', severity: 'low',
-      streamer_id: streamerId, streamer_name: last.streamer,
-      match_id: '', match_label: '',
-      metric: 'Streamer absent', metric_col: 'absent', fmt: 'int',
-      value: 0, expected: '—', delta: null,
-      note: 'Active in last ' + CONFIG.ABSENT_LOOKBACK_DAYS + 'd but no stream yesterday',
-    }));
   });
 
   return alerts;
