@@ -40,10 +40,11 @@ def _full_session():
         return _cache[key]
     df = _query(f"""
         SELECT
-            stream_id, streamer_id, streamer, stream_name, day, start_ts, end_ts,
-            stream_type, language, site, stream_site_id, currency,
-            match_id AS SabaMatchId, match_shared,
-            KickOffTime, time_slot_taipei, day_of_week, match_stage,
+            stream_id, anchor_id AS streamer_id, streamer, stream_name,
+            day, start_ts, end_ts,
+            language, shared, stream_site AS site, stream_site_id,
+            stream_id AS SabaMatchId,
+            time_slot_taipei, day_of_week, match_stage,
             {', '.join(AGG_COLS)},
             watch_min_per_viewer, pcu, chat_user, message_count
         FROM `{DATASET}.agg_session_metrics`
@@ -60,7 +61,7 @@ def get_streamers():
     if key in _cache:
         return _cache[key]
     df = _query(f"""
-        SELECT DISTINCT streamer_id, streamer
+        SELECT DISTINCT anchor_id AS streamer_id, streamer
         FROM `{DATASET}.agg_session_metrics`
         ORDER BY streamer
     """)

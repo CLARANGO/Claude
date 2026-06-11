@@ -101,7 +101,7 @@ const CONFIG = {
   // Data-revision drift alert: each run snapshots the last N days of
   // per-(stream, site) KPI values. If a previously-snapshotted day's value
   // changes ≥ DRIFT_THRESHOLD on a later run, fire a revision alert.
-  DRIFT_THRESHOLD: 0.10,
+  DRIFT_THRESHOLD: 0.15,
   SNAPSHOT_LOOKBACK_DAYS: 7,
   SNAPSHOT_RETENTION_DAYS: 14,
 };
@@ -114,6 +114,7 @@ const CONFIG = {
 function runDaily() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const yesterday = yesterdayInTz_(CONFIG.TIMEZONE);
+  const win = reportWindow_(CONFIG.TIMEZONE);
 
   const sessions = readTab_(ss, CONFIG.SESSION_TAB);
   if (!sessions.length) {
@@ -128,7 +129,7 @@ function runDaily() {
   if (drift.length) postDriftAlerts_(drift);
 
   const alerts = evaluateAlerts_(sessions, yesterday);
-  const digest = buildDigest_(sessions, yesterday, alerts);
+  const digest = buildDigest_(sessions, win, alerts);
 
   // Post main digest, then thread alerts under it
   const ts = postSlackBlocks_(digest);
@@ -159,9 +160,10 @@ function runDaily() {
 function testDigest() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const yesterday = yesterdayInTz_(CONFIG.TIMEZONE);
+  const win = reportWindow_(CONFIG.TIMEZONE);
   const sessions = readTab_(ss, CONFIG.SESSION_TAB);
   const alerts = evaluateAlerts_(sessions, yesterday);
-  const digest = buildDigest_(sessions, yesterday, alerts);
+  const digest = buildDigest_(sessions, win, alerts);
   postSlackBlocks_(digest);
 }
 
@@ -197,11 +199,19 @@ function testSlack() {
 // Digest builder
 // ============================================================
 
-function buildDigest_(sessions, yesterday, alerts) {
-  // All rows (including 'All site' aggregate). Baselines in buildMatchBlock_
-  // are scoped to the same (streamer, site) so sites are never mixed.
-  const yest = sessions.filter(function(r) {
-    return formatDate_(r.day) === yesterday;
+function buildDigest_(sessions, win, alerts) {
+  // Filter to the 12pm-yesterday → 12pm-today window. Baselines in
+  // buildMatchBlock_ are scoped to the same (streamer, site).
+  const yestRaw = sessions.filter(function(r) { return inWindow_(r, win); });
+  // De-dupe: SQL outer JOIN can produce repeat rows for the same
+  // (stream_id, stream_site_id) tuple. Keep the first.
+  const seen = {};
+  const yest = [];
+  yestRaw.forEach(function(r) {
+    const key = (r.stream_id || '') + '|' + (r.stream_site_id == null ? '' : r.stream_site_id);
+    if (seen[key]) return;
+    seen[key] = true;
+    yest.push(r);
   });
   yest.sort(function(a, b) {
     return (Number(b.follow_streamer_bet_count) || 0) - (Number(a.follow_streamer_bet_count) || 0);
@@ -210,13 +220,37 @@ function buildDigest_(sessions, yesterday, alerts) {
   const matchBlocks = yest.map(function(s) { return buildMatchBlock_(sessions, s); });
   const alertSummary = summarizeAlerts_(alerts);
   const matchCount = distinct_(yest, 'stream_id').length;
+  const topMatches = buildTopMatches_(yest, 3);
 
-  return '*📊 World Cup Dashboard — ' + yesterday + '*\n' +
+  return '*📊 World Cup Dashboard — ' + windowLabel_(win, CONFIG.TIMEZONE) + '*\n' +
     '_' + matchCount + ' matches · ' +
       distinct_(yest, 'streamer_id').length + ' streamers · ' +
       yest.length + ' per-site rows_\n\n' +
-    (matchBlocks.length ? matchBlocks.join('\n\n') : '_No matches yesterday._') +
+    (topMatches ? topMatches + '\n\n' : '') +
+    (matchBlocks.length ? matchBlocks.join('\n\n') : '_No matches in this window._') +
     '\n\n' + alertSummary;
+}
+
+/**
+ * Top N matches by Follow Streamer Bet Count, with streamer name + site.
+ * Each match shows the key NS metrics so the team can spot leaders quickly.
+ */
+function buildTopMatches_(yest, n) {
+  if (!yest || !yest.length) return '';
+  const sorted = yest.slice().sort(function(a, b) {
+    return (Number(b.follow_streamer_bet_count) || 0) - (Number(a.follow_streamer_bet_count) || 0);
+  }).slice(0, n);
+  const lines = sorted.map(function(s, i) {
+    const streamer = s.streamer || s.anchor_id || '?';
+    const site = s.stream_site || s.site || '';
+    const matchName = cleanStreamName_(s.stream_name || '');
+    return '  ' + (i + 1) + '. *' + streamer + '* (' + site + ')' +
+           (matchName ? ' — ' + matchName : '') + '\n' +
+           '     Follow Bets: ' + formatVal_(s.follow_streamer_bet_count, 'int') +
+           ' · BDW: ' + formatVal_(s.bdw_turnover_rm, 'rm') +
+           ' · Donations: ' + formatVal_(s.donation_amount_usd, 'usd');
+  });
+  return '*🏆 Top ' + sorted.length + ' matches (by Follow Bet Count):*\n' + lines.join('\n');
 }
 
 /**
@@ -703,6 +737,13 @@ function readTab_(ss, name) {
   return values.slice(1).map(function(row) {
     const obj = {};
     header.forEach(function(h, i) { obj[h] = row[i]; });
+    // Backwards-compat aliases for column renames in the updated SQL:
+    //   anchor_id   → streamer_id
+    //   stream_site → site
+    //   stream_id   → SabaMatchId (Clara joins m.SabaMatchId = csp.stream_id)
+    if (obj.anchor_id   != null && obj.streamer_id == null) obj.streamer_id  = obj.anchor_id;
+    if (obj.stream_site != null && obj.site        == null) obj.site         = obj.stream_site;
+    if (obj.stream_id   != null && obj.SabaMatchId == null) obj.SabaMatchId  = obj.stream_id;
     return obj;
   });
 }
@@ -859,6 +900,30 @@ function pad2_(n) { return n < 10 ? '0' + n : '' + n; }
 
 function todayInTz_(tz) {
   return Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+}
+
+/**
+ * Report window — 12:00 yesterday → 12:00 today (Taipei). Matches the
+ * 12pm BQ refresh cadence so each daily report covers exactly one cycle.
+ */
+function reportWindow_(tz) {
+  const todayStr = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+  const end = new Date(todayStr + 'T12:00:00+08:00');
+  const start = new Date(end.getTime() - 24 * 3600 * 1000);
+  return { start: start, end: end, todayStr: todayStr };
+}
+
+/** Date label for a 12pm-12pm window, e.g. "Jun 10 12:00 → Jun 11 12:00". */
+function windowLabel_(win, tz) {
+  const fmt = function(d) { return Utilities.formatDate(d, tz, 'MMM d HH:mm'); };
+  return fmt(win.start) + ' → ' + fmt(win.end);
+}
+
+/** True if the session's start_ts falls inside the given window. */
+function inWindow_(row, win) {
+  const ts = row.start_ts instanceof Date ? row.start_ts : new Date(row.start_ts);
+  if (isNaN(ts)) return false;
+  return ts >= win.start && ts < win.end;
 }
 
 /** List of last N day-strings ending at yesterday (inclusive). */
