@@ -59,6 +59,8 @@ const CONFIG = {
     { col: 'bdw_bet_count',                    label: 'Bet During Watch Count',       fmt: 'int', agg: 'sum' },
     { col: 'during_watch_user_rate',           label: 'BDW User Rate',                fmt: 'pct', agg: 'rate',
       rateNum: 'bdw_user_count', rateDen: 'viewers' },
+    { col: 'viewers',                          label: 'Viewers',                      fmt: 'int', agg: 'sum' },
+    { col: 'watch_over_10min_user',            label: 'Viewers >10min',               fmt: 'int', agg: 'sum' },
     { col: 'pcu',                              label: 'PCU',                          fmt: 'int', agg: 'max' },
   ],
 
