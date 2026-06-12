@@ -130,7 +130,7 @@ function runDaily() {
   const drift = evaluateDrift_(ss, sessions);
   if (drift.length) postDriftAlerts_(drift);
 
-  const alerts = evaluateAlerts_(sessions, yesterday);
+  const alerts = evaluateAlerts_(sessions, win);
   const digest = buildDigest_(sessions, win, alerts);
 
   // Post the digest as separate Slack messages (header + per-match chunks),
@@ -165,7 +165,7 @@ function testDigest() {
   const yesterday = yesterdayInTz_(CONFIG.TIMEZONE);
   const win = reportWindow_(CONFIG.TIMEZONE);
   const sessions = readTab_(ss, CONFIG.SESSION_TAB);
-  const alerts = evaluateAlerts_(sessions, yesterday);
+  const alerts = evaluateAlerts_(sessions, win);
   const digest = buildDigest_(sessions, win, alerts);
   postSlackMessages_(digest);
 }
@@ -586,10 +586,11 @@ function summarizeAlerts_(alerts) {
 // Alert evaluation
 // ============================================================
 
-function evaluateAlerts_(sessions, yesterday) {
+function evaluateAlerts_(sessions, win) {
   const alerts = [];
+  const reportLabel = windowLabel_(win, CONFIG.TIMEZONE);
 
-  // Group sessions by streamer, sorted by session_date ASC
+  // Group sessions by streamer, sorted by start_ts ASC
   const byStreamer = {};
   sessions.forEach(function(r) {
     if (!byStreamer[r.streamer_id]) byStreamer[r.streamer_id] = [];
@@ -597,13 +598,16 @@ function evaluateAlerts_(sessions, yesterday) {
   });
   Object.keys(byStreamer).forEach(function(k) {
     byStreamer[k].sort(function(a, b) {
-      return new Date(a.day) - new Date(b.day);
+      return new Date(a.start_ts) - new Date(b.start_ts);
     });
   });
 
   Object.keys(byStreamer).forEach(function(streamerId) {
     const ses = byStreamer[streamerId];
-    const yestSessions = ses.filter(function(r) { return formatDate_(r.day) === yesterday; });
+    // Alerts evaluated on sessions inside the same 12pm-12pm reporting window
+    // used by the daily digest — otherwise the alert count won't match what
+    // the digest displays.
+    const yestSessions = ses.filter(function(r) { return inWindow_(r, win); });
 
     yestSessions.forEach(function(s) {
       // Min-volume gate
@@ -631,7 +635,7 @@ function evaluateAlerts_(sessions, yesterday) {
           else if (delta <= t.medium) severity = 'medium';
           if (severity) {
             alerts.push(makeAlert_({
-              date: yesterday, type: 'threshold', severity: severity,
+              date: reportLabel, type: 'threshold', severity: severity,
               streamer_id: streamerId, streamer_name: s.streamer,
               match_id: s.stream_id || s.SabaMatchId, match_label: matchLabel_(s),
               metric: kpi.label, metric_col: kpi.col, fmt: kpi.fmt,
@@ -646,7 +650,7 @@ function evaluateAlerts_(sessions, yesterday) {
         const mad = mad_(priorVals);
         if (mad > 0 && Math.abs(current - med) > CONFIG.ANOMALY_MAD_MULTIPLIER * mad) {
           alerts.push(makeAlert_({
-            date: yesterday, type: 'anomaly', severity: 'medium',
+            date: reportLabel, type: 'anomaly', severity: 'medium',
             streamer_id: streamerId, streamer_name: s.streamer,
             match_id: s.SabaMatchId, match_label: matchLabel_(s),
             metric: kpi.label, metric_col: kpi.col, fmt: kpi.fmt,
