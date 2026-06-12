@@ -205,11 +205,14 @@ function testSlack() {
 function buildDigest_(sessions, win, alerts) {
   const yestRaw = sessions.filter(function(r) { return inWindow_(r, win); });
   // De-dupe: SQL outer JOIN can produce repeat rows for the same
-  // (stream_id, stream_site_id) tuple. Keep the first.
+  // (stream_id, anchor_id, stream_site_id) tuple. anchor_id is included so
+  // two streamers covering the same match aren't merged into one block.
   const seen = {};
   const yest = [];
   yestRaw.forEach(function(r) {
-    const key = (r.stream_id || '') + '|' + (r.stream_site_id == null ? '' : r.stream_site_id);
+    const key = (r.stream_id || '') + '|' +
+                (r.anchor_id || r.streamer_id || '') + '|' +
+                (r.stream_site_id == null ? '' : r.stream_site_id);
     if (seen[key]) return;
     seen[key] = true;
     yest.push(r);
