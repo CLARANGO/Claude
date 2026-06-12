@@ -266,43 +266,36 @@ function buildTopMatches_(yest, n) {
 function buildMatchBlock_(sessions, s) {
   const streamId = s.stream_id || s.SabaMatchId || 'n/a';
   const streamer = s.streamer || s.streamer_id || '?';
-  const site = s.site || 'unknown';
+  const site = s.stream_site || s.site || 'unknown';
   const matchName = cleanStreamName_(s.stream_name || '');
   const stageKey = s.match_stage || 'n/a';
   const stageLabel = CONFIG.STAGE_LABELS[stageKey] || stageKey;
   const titleLine = stageLabel + (matchName ? ' — ' + matchName : '');
 
-  // Baseline pool: same streamer AND same site (don't mix sites). Also
-  // exclude 'All site' rows so we compare apples to apples.
+  // Baseline pool: same streamer AND same site (don't mix sites).
   const samePool = sessions.filter(function(p) {
-    return p.streamer_id === s.streamer_id &&
-           (p.site || '') === site &&
-           (p.site || '') !== CONFIG.ALL_SITE_LABEL;
+    return p.streamer_id === s.streamer_id && (p.stream_site || p.site || '') === site;
   });
-
-  // Baseline 1 — last 2 matches before this one
   const last2 = samePool
-    .filter(function(p) { return new Date(p.day) < new Date(s.day); })
-    .sort(function(a, b) { return new Date(a.day) - new Date(b.day); })
+    .filter(function(p) { return new Date(p.start_ts) < new Date(s.start_ts); })
+    .sort(function(a, b) { return new Date(a.start_ts) - new Date(b.start_ts); })
     .slice(-2);
-
-  // Baseline 2 — same-site May 2026 average
   const may = samePool.filter(function(p) { return extractMonth_(p.day) === 5; });
 
-  const rows = [['Metric', 'Value', 'vs Last 2', 'vs May Avg']];
-  CONFIG.DISPLAY_METRICS.forEach(function(kpi) {
+  // Vertical bullet list — mobile-friendly. Each metric on its own line so
+  // narrow phone screens don't wrap a single row across multiple visual lines.
+  const lines = CONFIG.DISPLAY_METRICS.map(function(kpi) {
     const v = valueForRow_(s, kpi);
-    rows.push([
-      kpi.label,
-      isNaN(v) ? 'n/a' : formatVal_(v, kpi.fmt),
-      arrowDelta_(v, avgForKpi_(last2, kpi)),
-      arrowDelta_(v, avgForKpi_(may, kpi)),
-    ]);
+    const valStr = isNaN(v) ? 'n/a' : formatVal_(v, kpi.fmt);
+    const dL2  = arrowDelta_(v, avgForKpi_(last2, kpi));
+    const dMay = arrowDelta_(v, avgForKpi_(may, kpi));
+    return '• *' + kpi.label + '*: ' + valStr +
+           '   _(L2 ' + dL2 + ' · May ' + dMay + ')_';
   });
 
   return '*⚽ Match ' + streamId + ' · ' + streamer + ' · ' + site + '*\n' +
     '_' + titleLine + '_\n' +
-    '```\n' + formatTable_(rows, [1]) + '\n```';
+    lines.join('\n');
 }
 
 /** Mean of `col` across an array of session rows (NaNs filtered). */
