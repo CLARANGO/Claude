@@ -133,10 +133,11 @@ function runDaily() {
   const alerts = evaluateAlerts_(sessions, yesterday);
   const digest = buildDigest_(sessions, win, alerts);
 
-  // Post main digest, then thread alerts under it
-  const ts = postSlackBlocks_(digest);
+  // Post the digest as separate Slack messages (header + per-match chunks),
+  // then post the alert detail as its own message.
+  postSlackMessages_(digest);
   if (alerts.length) {
-    postAlertThread_(alerts, ts);
+    postAlertThread_(alerts, null);
   }
   if (alerts.some(function(a) { return a.severity === 'high'; })) {
     postHighSeverityPing_(alerts.filter(function(a) { return a.severity === 'high'; }));
@@ -149,7 +150,7 @@ function runDaily() {
   if (isMonday_()) {
     const weekRange = priorWeekRange_(yesterday);
     const weekReport = buildWeeklyDigest_(sessions, weekRange.start, weekRange.end);
-    postSlack_(weekReport);
+    postSlackMessages_(weekReport);
   }
 
   // Snapshot last N days AFTER drift check so we capture today's read for
@@ -166,7 +167,7 @@ function testDigest() {
   const sessions = readTab_(ss, CONFIG.SESSION_TAB);
   const alerts = evaluateAlerts_(sessions, yesterday);
   const digest = buildDigest_(sessions, win, alerts);
-  postSlackBlocks_(digest);
+  postSlackMessages_(digest);
 }
 
 /**
@@ -189,7 +190,7 @@ function testWeekly() {
   const sunStr = Utilities.formatDate(sun, CONFIG.TIMEZONE, 'yyyy-MM-dd');
   const range = priorWeekRange_(sunStr);
   const report = buildWeeklyDigest_(sessions, range.start, range.end);
-  postSlack_(report);
+  postSlackMessages_(report);
 }
 
 /** Simple webhook ping. */
@@ -202,8 +203,6 @@ function testSlack() {
 // ============================================================
 
 function buildDigest_(sessions, win, alerts) {
-  // Filter to the 12pm-yesterday → 12pm-today window. Baselines in
-  // buildMatchBlock_ are scoped to the same (streamer, site).
   const yestRaw = sessions.filter(function(r) { return inWindow_(r, win); });
   // De-dupe: SQL outer JOIN can produce repeat rows for the same
   // (stream_id, stream_site_id) tuple. Keep the first.
@@ -224,13 +223,17 @@ function buildDigest_(sessions, win, alerts) {
   const matchCount = distinct_(yest, 'stream_id').length;
   const topMatches = buildTopMatches_(yest, 3);
 
-  return '*📊 World Cup Dashboard — ' + windowLabel_(win, CONFIG.TIMEZONE) + '*\n' +
+  const header = '*📊 World Cup Dashboard — ' + windowLabel_(win, CONFIG.TIMEZONE) + '*\n' +
     '_' + matchCount + ' matches · ' +
       distinct_(yest, 'streamer_id').length + ' streamers · ' +
       yest.length + ' per-site rows_\n\n' +
-    (topMatches ? topMatches + '\n\n' : '') +
-    (matchBlocks.length ? matchBlocks.join('\n\n') : '_No matches in this window._') +
+    (topMatches || '') +
     '\n\n' + alertSummary;
+
+  // Return as an array of separate messages so Slack mrkdwn renders each
+  // code block cleanly. Header in one post, match blocks chunked.
+  if (!matchBlocks.length) return [header + '\n\n_No matches in this window._'];
+  return [header].concat(chunkBlocks_(matchBlocks));
 }
 
 /**
@@ -445,16 +448,28 @@ function buildWeeklyDigest_(sessions, weekStart, weekEnd) {
            ', ' + formatVal_(m.bdw_turnover_rm, 'rm') + ' BDW';
   });
 
-  return '*📅 Weekly Report — ' + weekDateLabel_(weekStart, weekEnd) + '*\n' +
+  const overview =
+    '*📅 Weekly Report — ' + weekDateLabel_(weekStart, weekEnd) + '*\n' +
     '_' + matchCount + ' matches · ' +
       distinct_(weekSessions, 'streamer_id').length + ' streamers_\n' +
-    '\n*NS Weekly KPIs:*\n```\n' + kpiTable + '\n```\n' +
-    '\n*🌐 By Language:*\n' +
-    (langBlocks.length ? langBlocks.join('\n\n') : '  _no data_') + '\n' +
-    '\n*🏆 Top 5 streamers (Follow Bet Count):*\n' +
-      (top5Streamers.length ? top5Streamers.join('\n') : '  _no data_') + '\n' +
-    '\n*⚽ Top 5 matches (Follow Bet Count):*\n' +
-      (top5Matches.length ? top5Matches.join('\n') : '  _no data_') + '\n';
+    '\n*NS Weekly KPIs:*\n```\n' + kpiTable + '\n```';
+
+  const langHeader = '*🌐 By Language:*';
+  const langChunks = langBlocks.length
+    ? chunkBlocks_(langBlocks)
+    : ['  _no data_'];
+  // Attach the header to the first language chunk so it appears once.
+  const langMessages = langChunks.map(function(c, i) {
+    return i === 0 ? langHeader + '\n' + c : c;
+  });
+
+  const tops =
+    '*🏆 Top 5 streamers (Follow Bet Count):*\n' +
+      (top5Streamers.length ? top5Streamers.join('\n') : '  _no data_') +
+    '\n\n*⚽ Top 5 matches (Follow Bet Count):*\n' +
+      (top5Matches.length ? top5Matches.join('\n') : '  _no data_');
+
+  return [overview].concat(langMessages).concat([tops]);
 }
 
 /**
@@ -595,9 +610,9 @@ function evaluateAlerts_(sessions, yesterday) {
       if (Number(s.viewers) < CONFIG.MIN_VIEWERS) return;
       if (Number(s.total_bet_count || 0) < CONFIG.MIN_BETS) return;
 
-      // Rolling-5 prior window (sessions strictly before this one)
+      // Rolling-5 prior window (sessions strictly before this one by start_ts)
       const priors = ses
-        .filter(function(r) { return new Date(r.day) < new Date(s.session_date); })
+        .filter(function(r) { return new Date(r.start_ts) < new Date(s.start_ts); })
         .slice(-CONFIG.ROLLING_WINDOW);
       if (priors.length < CONFIG.MIN_SAMPLE_FOR_DELTA) return;
 
@@ -664,6 +679,34 @@ function postSlack_(text) {
     payload: JSON.stringify({ text: text }),
     muteHttpExceptions: true,
   });
+}
+
+/** Post one or more Slack messages. Accepts string or array of strings. */
+function postSlackMessages_(parts) {
+  if (!parts) return;
+  if (typeof parts === 'string') { postSlack_(parts); return; }
+  parts.forEach(function(p) { if (p) postSlack_(p); });
+}
+
+/**
+ * Pack a list of block strings into chunks ≤ maxChars total. Stops a chunk
+ * before adding a block that would push it over. Prevents Slack's mrkdwn
+ * parser from breaking mid-codeblock on long messages.
+ */
+function chunkBlocks_(blocks, maxChars) {
+  maxChars = maxChars || 2800;
+  const chunks = [];
+  let cur = '';
+  blocks.forEach(function(b) {
+    if (!b) return;
+    if (cur && (cur.length + b.length + 2) > maxChars) {
+      chunks.push(cur);
+      cur = '';
+    }
+    cur = cur ? cur + '\n\n' + b : b;
+  });
+  if (cur) chunks.push(cur);
+  return chunks;
 }
 
 function postSlackBlocks_(text) {
