@@ -45,24 +45,30 @@ const CONFIG = {
     { col: 'bdw_bet_count',                    label: 'Bet During Watch Count (L2)',       fmt: 'int' },
   ],
 
-  // Daily per-match table + weekly KPI table. 'sum' aggs total via SUM, 'max' via MAX,
-  // 'rate' is rateNum/rateDen (weighted across the pool for totals, mean for avg/match).
-  DISPLAY_METRICS: [
-    { col: 'follow_streamer_bet_count',        label: 'Follow Streamer Bet Count',    fmt: 'int', agg: 'sum' },
-    { col: 'bdw_turnover_rm',                  label: 'Bet During Watch Turnover',    fmt: 'rm',  agg: 'sum' },
-    { col: 'donation_amount_usd',              label: 'Donation Amount',              fmt: 'usd', agg: 'sum' },
-    { col: 'follow_streamer_bet_turnover_rm',  label: 'Follow Streamer Bet Turnover', fmt: 'rm',  agg: 'sum' },
-    { col: 'follow_user_count',                label: 'Follow Bet User',              fmt: 'int', agg: 'sum' },
-    { col: 'follow_bet_user_rate',             label: 'Follow Bet User Rate',         fmt: 'pct', agg: 'rate',
-      rateNum: 'follow_user_count', rateDen: 'bdw_user_count' },
-    { col: 'donation_user_count',              label: 'Donation User Count',          fmt: 'int', agg: 'sum' },
-    { col: 'bdw_bet_count',                    label: 'Bet During Watch Count',       fmt: 'int', agg: 'sum' },
-    { col: 'during_watch_user_rate',           label: 'BDW User Rate',                fmt: 'pct', agg: 'rate',
-      rateNum: 'bdw_user_count', rateDen: 'viewers' },
-    { col: 'viewers',                          label: 'Viewers',                      fmt: 'int', agg: 'sum' },
-    { col: 'watch_over_10min_user',            label: 'Viewers >10min',               fmt: 'int', agg: 'sum' },
-    { col: 'pcu',                              label: 'PCU',                          fmt: 'int', agg: 'max' },
+  // NS metrics — get baselines in the daily block; drive the day-avg alert.
+  NS_METRICS: [
+    { col: 'follow_streamer_bet_count', label: 'Follow Bet Count',    fmt: 'int', agg: 'sum' },
+    { col: 'bdw_turnover_rm',           label: 'BDW Turnover',        fmt: 'rm',  agg: 'sum' },
+    { col: 'donation_amount_usd',       label: 'Donation Amount',     fmt: 'usd', agg: 'sum' },
   ],
+
+  // Supporting metrics — shown without baselines in the daily block.
+  SUPPORTING_METRICS: [
+    { col: 'follow_streamer_bet_turnover_rm', label: 'Follow Bet Turnover',  fmt: 'rm',  agg: 'sum' },
+    { col: 'follow_user_count',               label: 'Follow Bet User',      fmt: 'int', agg: 'sum' },
+    { col: 'follow_bet_user_rate',            label: 'Follow Bet User Rate', fmt: 'pct', agg: 'rate',
+      rateNum: 'follow_user_count', rateDen: 'bdw_user_count' },
+    { col: 'donation_user_count',             label: 'Donation Users',       fmt: 'int', agg: 'sum' },
+    { col: 'bdw_bet_count',                   label: 'BDW Count',            fmt: 'int', agg: 'sum' },
+    { col: 'during_watch_user_rate',          label: 'BDW User Rate',        fmt: 'pct', agg: 'rate',
+      rateNum: 'bdw_user_count', rateDen: 'viewers' },
+    { col: 'viewers',                         label: 'Viewers',              fmt: 'int', agg: 'sum' },
+    { col: 'watch_over_10min_user',           label: 'Viewers >10min',       fmt: 'int', agg: 'sum' },
+    { col: 'pcu',                             label: 'PCU',                  fmt: 'int', agg: 'max' },
+  ],
+
+  // DISPLAY_METRICS = NS + Supporting; set after the literal (see below).
+  DISPLAY_METRICS: [],
 
   STAGE_LABELS: {
     'group':     'Group Stage',
@@ -106,7 +112,17 @@ const CONFIG = {
   DRIFT_THRESHOLD: 0.15,
   SNAPSHOT_LOOKBACK_DAYS: 7,
   SNAPSHOT_RETENTION_DAYS: 14,
+
+  // Daily NS spike alert: fire when any NS metric on a (match × streamer × site)
+  // row is more than SPIKE_MULTIPLIER × the day's avg of that metric.
+  SPIKE_MULTIPLIER: 3,
+
+  // Block Kit color sidebars
+  COLOR_OK:     '#36a64f',
+  COLOR_WARN:   '#f2c744',
+  COLOR_ALERT:  '#dc3545',
 };
+CONFIG.DISPLAY_METRICS = CONFIG.NS_METRICS.concat(CONFIG.SUPPORTING_METRICS);
 
 // ============================================================
 // Entry points
@@ -202,80 +218,114 @@ function testSlack() {
 // Digest builder
 // ============================================================
 
+/**
+ * Build the daily digest as an array of Slack Block Kit payloads:
+ *   1. Header message (title + window + alert summary + top 3)
+ *   2. One message per match (each match = an attachment with color sidebar)
+ *
+ * Each match's color reflects whether it triggered any spike alert.
+ */
 function buildDigest_(sessions, win, alerts) {
-  const yestRaw = sessions.filter(function(r) { return inWindow_(r, win); });
-  // De-dupe: SQL outer JOIN can produce repeat rows for the same
-  // (stream_id, anchor_id, stream_site_id) tuple. anchor_id is included so
-  // two streamers covering the same match aren't merged into one block.
-  const seen = {};
-  const yest = [];
-  yestRaw.forEach(function(r) {
-    const key = (r.stream_id || '') + '|' +
-                (r.anchor_id || r.streamer_id || '') + '|' +
-                (r.stream_site_id == null ? '' : r.stream_site_id);
-    if (seen[key]) return;
-    seen[key] = true;
-    yest.push(r);
-  });
-  yest.sort(function(a, b) {
+  const yest = dedupedWindowRows_(sessions, win).sort(function(a, b) {
     return (Number(b.follow_streamer_bet_count) || 0) - (Number(a.follow_streamer_bet_count) || 0);
   });
 
-  const matchBlocks = yest.map(function(s) { return buildMatchBlock_(sessions, s); });
-  const alertSummary = summarizeAlerts_(alerts);
+  // Build a lookup of alerts per (stream_id|anchor_id|stream_site_id) so the
+  // match block can color itself + render alert chips.
+  const alertsByRow = {};
+  alerts.forEach(function(a) {
+    const k = (a.match_id || '') + '|' + (a.streamer_id || '') + '|' + (a.site || '');
+    if (!alertsByRow[k]) alertsByRow[k] = [];
+    alertsByRow[k].push(a);
+  });
+
+  const headerPayload = buildHeaderMessage_(yest, win, alerts);
+  if (!yest.length) return [headerPayload];
+
+  // Each match → one message with one attachment. Keeps each Slack message
+  // small and avoids hitting block / attachment limits.
+  const matchPayloads = yest.map(function(s) {
+    const k = (s.stream_id || '') + '|' +
+              (s.anchor_id || s.streamer_id || '') + '|' +
+              (s.stream_site || s.site || '');
+    return buildMatchMessage_(sessions, s, alertsByRow[k] || []);
+  });
+
+  return [headerPayload].concat(matchPayloads);
+}
+
+function buildHeaderMessage_(yest, win, alerts) {
   const matchCount = distinct_(yest, 'stream_id').length;
-  const topMatches = buildTopMatches_(yest, 3);
+  const streamerCount = distinct_(yest, 'streamer_id').length;
 
-  const header = '*📊 World Cup Dashboard — ' + windowLabel_(win, CONFIG.TIMEZONE) + '*\n' +
-    '_' + matchCount + ' matches · ' +
-      distinct_(yest, 'streamer_id').length + ' streamers · ' +
-      yest.length + ' per-site rows_\n\n' +
-    (topMatches || '') +
-    '\n\n' + alertSummary;
+  const blocks = [];
+  blocks.push(bkHeader_('📊 World Cup Dashboard'));
+  blocks.push(bkContext_(
+    '*' + windowLabel_(win, CONFIG.TIMEZONE) + '* · ' +
+    '`' + matchCount + '` matches · `' + streamerCount + '` streamers · `' + yest.length + '` rows'
+  ));
 
-  // Return as an array of separate messages so Slack mrkdwn renders each
-  // code block cleanly. Header in one post, match blocks chunked.
-  if (!matchBlocks.length) return [header + '\n\n_No matches in this window._'];
-  return [header].concat(chunkBlocks_(matchBlocks));
+  // Alert summary attachment (color + line)
+  const high = alerts.filter(function(a) { return a.severity === 'high'; }).length;
+  const med  = alerts.filter(function(a) { return a.severity === 'medium'; }).length;
+  let alertColor, alertText;
+  if (!alerts.length) {
+    alertColor = CONFIG.COLOR_OK;
+    alertText = '✅ *No NS spikes today*';
+  } else {
+    alertColor = high ? CONFIG.COLOR_ALERT : CONFIG.COLOR_WARN;
+    const parts = [];
+    if (high) parts.push('`' + high + '` high');
+    if (med)  parts.push('`' + med + '` medium');
+    alertText = '⚠️ *' + alerts.length + ' NS spike alert' + (alerts.length > 1 ? 's' : '') + '* (' + parts.join(' · ') + ')';
+  }
+
+  // Top 3 by Follow Bet Count
+  const top = yest.slice(0, 3);
+  const topBlocks = [];
+  if (top.length) {
+    topBlocks.push(bkHeader_('🏆 Top ' + top.length + ' matches'));
+    top.forEach(function(s, i) {
+      const streamer = s.streamer || s.anchor_id || '?';
+      const site = s.stream_site || s.site || '';
+      const matchId = s.stream_id || 'n/a';
+      const stage = CONFIG.STAGE_LABELS[s.match_stage] || s.match_stage || '';
+      const matchName = cleanStreamName_(s.stream_name || '');
+      topBlocks.push(bkSection_(
+        '*#' + (i + 1) + '  ' + streamer + '* · ' + site + '\n' +
+        'Match `' + matchId + '`' + (stage ? ' · ' + stage : '') + '\n' +
+        (matchName ? '_' + matchName + '_' : '')
+      ));
+      topBlocks.push(bkSectionFields_([
+        bkField_('*Follow Bets*\n`' + formatVal_(s.follow_streamer_bet_count, 'int') + '`'),
+        bkField_('*BDW Turnover*\n`' + formatVal_(s.bdw_turnover_rm, 'rm') + '`'),
+        bkField_('*Donations*\n`' + formatVal_(s.donation_amount_usd, 'usd') + '`'),
+        bkField_('*Viewers >10min*\n`' + formatVal_(s.watch_over_10min_user, 'int') + '`'),
+      ]));
+    });
+  }
+
+  return {
+    blocks: blocks,
+    attachments: [
+      bkAttachment_(alertColor, [bkSection_(alertText)]),
+    ].concat(topBlocks.length ? [bkAttachment_(CONFIG.COLOR_OK, topBlocks)] : []),
+  };
 }
 
 /**
- * Top N matches by Follow Streamer Bet Count, with streamer name + site.
- * Each match shows the key NS metrics so the team can spot leaders quickly.
+ * One Slack message = one match. The match is wrapped in a colored
+ * attachment (green = no alert, yellow = medium, red = high).
  */
-function buildTopMatches_(yest, n) {
-  if (!yest || !yest.length) return '';
-  const sorted = yest.slice().sort(function(a, b) {
-    return (Number(b.follow_streamer_bet_count) || 0) - (Number(a.follow_streamer_bet_count) || 0);
-  }).slice(0, n);
-  const lines = sorted.map(function(s, i) {
-    const streamer = s.streamer || s.anchor_id || '?';
-    const site = s.stream_site || s.site || '';
-    const matchId = s.stream_id || s.SabaMatchId || 'n/a';
-    const matchName = cleanStreamName_(s.stream_name || '');
-    return '  ' + (i + 1) + '. *' + streamer + '* (' + site + ') · Match ' + matchId +
-           (matchName ? ' — ' + matchName : '') + '\n' +
-           '     Follow Bets: ' + formatVal_(s.follow_streamer_bet_count, 'int') +
-           ' · BDW: ' + formatVal_(s.bdw_turnover_rm, 'rm') +
-           ' · Donations: ' + formatVal_(s.donation_amount_usd, 'usd');
-  });
-  return '*🏆 Top ' + sorted.length + ' matches (by Follow Bet Count):*\n' + lines.join('\n');
-}
-
-/**
- * Per-match block: header + single 4-column comparison table.
- * Columns: Metric | Value | vs Last 2 Matches | vs May Avg
- */
-function buildMatchBlock_(sessions, s) {
-  const streamId = s.stream_id || s.SabaMatchId || 'n/a';
+function buildMatchMessage_(sessions, s, alertsForMatch) {
+  const streamId = s.stream_id || 'n/a';
   const streamer = s.streamer || s.streamer_id || '?';
   const site = s.stream_site || s.site || 'unknown';
   const matchName = cleanStreamName_(s.stream_name || '');
-  const stageKey = s.match_stage || 'n/a';
-  const stageLabel = CONFIG.STAGE_LABELS[stageKey] || stageKey;
+  const stageLabel = CONFIG.STAGE_LABELS[s.match_stage] || s.match_stage || '';
   const titleLine = stageLabel + (matchName ? ' — ' + matchName : '');
 
-  // Baseline pool: same streamer AND same site (don't mix sites).
+  // Baseline pool: same streamer + same site.
   const samePool = sessions.filter(function(p) {
     return p.streamer_id === s.streamer_id && (p.stream_site || p.site || '') === site;
   });
@@ -285,21 +335,52 @@ function buildMatchBlock_(sessions, s) {
     .slice(-2);
   const may = samePool.filter(function(p) { return extractMonth_(p.day) === 5; });
 
-  // Vertical bullet list — mobile-friendly. Each metric on its own line so
-  // narrow phone screens don't wrap a single row across multiple visual lines.
-  const lines = CONFIG.DISPLAY_METRICS.map(function(kpi) {
+  // Color based on the highest severity alert on this match.
+  let color = CONFIG.COLOR_OK;
+  if (alertsForMatch.some(function(a) { return a.severity === 'high'; })) color = CONFIG.COLOR_ALERT;
+  else if (alertsForMatch.length) color = CONFIG.COLOR_WARN;
+
+  const blocks = [];
+  blocks.push(bkSection_(
+    '*⚽ Match `' + streamId + '`*\n' +
+    '*' + streamer + '* · ' + site +
+    (titleLine ? '\n_' + titleLine + '_' : '')
+  ));
+
+  // Spike alert chips (if any)
+  if (alertsForMatch.length) {
+    const chips = alertsForMatch.map(function(a) {
+      return '`' + a.metric + ' ' + a.ratio.toFixed(1) + '×`';
+    });
+    blocks.push(bkContext_('🚨 *Spikes*: ' + chips.join(' · ')));
+  }
+
+  blocks.push(bkDivider_());
+  blocks.push(bkContext_('🎯 *NS Metrics*'));
+  blocks.push(bkSectionFields_(CONFIG.NS_METRICS.map(function(kpi) {
     const v = valueForRow_(s, kpi);
     const valStr = isNaN(v) ? 'n/a' : formatVal_(v, kpi.fmt);
     const dL2  = arrowDelta_(v, avgForKpi_(last2, kpi));
     const dMay = arrowDelta_(v, avgForKpi_(may, kpi));
-    return '• *' + kpi.label + '*: ' + valStr +
-           '   _(L2 ' + dL2 + ' · May ' + dMay + ')_';
-  });
+    return bkField_(
+      '*' + kpi.label + '*\n' +
+      '`' + valStr + '`\n' +
+      '_L2 ' + dL2 + ' · May ' + dMay + '_'
+    );
+  })));
 
-  return '*⚽ Match ' + streamId + ' · ' + streamer + ' · ' + site + '*\n' +
-    '_' + titleLine + '_\n' +
-    lines.join('\n');
+  blocks.push(bkDivider_());
+  blocks.push(bkContext_('📊 *Supporting Metrics*'));
+  // Slack section fields max = 10; we have ≤9 supporting metrics. Fits.
+  blocks.push(bkSectionFields_(CONFIG.SUPPORTING_METRICS.map(function(kpi) {
+    const v = valueForRow_(s, kpi);
+    const valStr = isNaN(v) ? 'n/a' : formatVal_(v, kpi.fmt);
+    return bkField_('*' + kpi.label + '*\n`' + valStr + '`');
+  })));
+
+  return { attachments: [bkAttachment_(color, blocks)] };
 }
+
 
 /** Mean of `col` across an array of session rows (NaNs filtered). */
 function avgOf_(rows, col) {
@@ -565,100 +646,72 @@ function priorWeeksPerMatchAvg_(sessions, weekStart, kpi) {
   return weekAvgs.reduce(function(a, x) { return a + x; }, 0) / weekAvgs.length;
 }
 
-function summarizeAlerts_(alerts) {
-  if (!alerts.length) return '✅ No alerts overnight.';
-  const high = alerts.filter(function(a) { return a.severity === 'high'; }).length;
-  const med  = alerts.filter(function(a) { return a.severity === 'medium'; }).length;
-  const low  = alerts.filter(function(a) { return a.severity === 'low'; }).length;
-  const parts = [];
-  if (high) parts.push(high + ' high');
-  if (med)  parts.push(med  + ' medium');
-  if (low)  parts.push(low  + ' low');
-  return '⚠️ *' + alerts.length + ' alert' + (alerts.length > 1 ? 's' : '') +
-         ' overnight* (' + parts.join(', ') + ') — see thread for detail.';
-}
-
 // ============================================================
 // Alert evaluation
 // ============================================================
 
+/**
+ * Daily NS spike alert: for each NS metric, compute the avg across all
+ * (match × streamer × site) rows in the window; fire on any row whose
+ * value exceeds SPIKE_MULTIPLIER × that avg.
+ */
 function evaluateAlerts_(sessions, win) {
-  const alerts = [];
+  const winRows = dedupedWindowRows_(sessions, win);
+  if (!winRows.length) return [];
+
   const reportLabel = windowLabel_(win, CONFIG.TIMEZONE);
-
-  // Group sessions by streamer, sorted by start_ts ASC
-  const byStreamer = {};
-  sessions.forEach(function(r) {
-    if (!byStreamer[r.streamer_id]) byStreamer[r.streamer_id] = [];
-    byStreamer[r.streamer_id].push(r);
-  });
-  Object.keys(byStreamer).forEach(function(k) {
-    byStreamer[k].sort(function(a, b) {
-      return new Date(a.start_ts) - new Date(b.start_ts);
-    });
+  const dayAvg = {};
+  CONFIG.NS_METRICS.forEach(function(ns) {
+    const vals = winRows.map(function(r) { return Number(r[ns.col]) || 0; });
+    const sum = vals.reduce(function(a, x) { return a + x; }, 0);
+    dayAvg[ns.col] = vals.length ? sum / vals.length : 0;
   });
 
-  Object.keys(byStreamer).forEach(function(streamerId) {
-    const ses = byStreamer[streamerId];
-    // Alerts evaluated on sessions inside the same 12pm-12pm reporting window
-    // used by the daily digest — otherwise the alert count won't match what
-    // the digest displays.
-    const yestSessions = ses.filter(function(r) { return inWindow_(r, win); });
-
-    yestSessions.forEach(function(s) {
-      // Min-volume gate
-      if (Number(s.viewers) < CONFIG.MIN_VIEWERS) return;
-      if (Number(s.total_bet_count || 0) < CONFIG.MIN_BETS) return;
-
-      // Rolling-5 prior window (sessions strictly before this one by start_ts)
-      const priors = ses
-        .filter(function(r) { return new Date(r.start_ts) < new Date(s.start_ts); })
-        .slice(-CONFIG.ROLLING_WINDOW);
-      if (priors.length < CONFIG.MIN_SAMPLE_FOR_DELTA) return;
-
-      CONFIG.KPIS.forEach(function(kpi) {
-        const priorVals = priors.map(function(p) { return Number(p[kpi.col]); }).filter(function(v) { return !isNaN(v); });
-        const med = median_(priorVals);
-        const current = Number(s[kpi.col]);
-        if (med <= 0 || isNaN(current)) return;
-        const delta = (current - med) / med;
-
-        // Threshold check
-        const t = CONFIG.THRESHOLDS[kpi.col];
-        if (t) {
-          let severity = null;
-          if (delta <= t.high)   severity = 'high';
-          else if (delta <= t.medium) severity = 'medium';
-          if (severity) {
-            alerts.push(makeAlert_({
-              date: reportLabel, type: 'threshold', severity: severity,
-              streamer_id: streamerId, streamer_name: s.streamer,
-              match_id: s.stream_id || s.SabaMatchId, match_label: matchLabel_(s),
-              metric: kpi.label, metric_col: kpi.col, fmt: kpi.fmt,
-              value: current, expected: med, delta: delta,
-              note: 'Drop ' + (delta * 100).toFixed(0) + '% vs rolling-5 median',
-            }));
-            return;
-          }
-        }
-
-        // Anomaly check (only if no threshold fired)
-        const mad = mad_(priorVals);
-        if (mad > 0 && Math.abs(current - med) > CONFIG.ANOMALY_MAD_MULTIPLIER * mad) {
-          alerts.push(makeAlert_({
-            date: reportLabel, type: 'anomaly', severity: 'medium',
-            streamer_id: streamerId, streamer_name: s.streamer,
-            match_id: s.SabaMatchId, match_label: matchLabel_(s),
-            metric: kpi.label, metric_col: kpi.col, fmt: kpi.fmt,
-            value: current, expected: med, delta: delta,
-            note: 'Outside ±' + CONFIG.ANOMALY_MAD_MULTIPLIER + '·MAD of rolling-5 median',
-          }));
-        }
+  const alerts = [];
+  winRows.forEach(function(r) {
+    CONFIG.NS_METRICS.forEach(function(ns) {
+      const v = Number(r[ns.col]) || 0;
+      const avg = dayAvg[ns.col];
+      if (avg <= 0 || v < CONFIG.SPIKE_MULTIPLIER * avg) return;
+      const ratio = v / avg;
+      alerts.push({
+        date: reportLabel,
+        type: 'spike',
+        severity: 'medium',
+        streamer_id: r.anchor_id || r.streamer_id,
+        streamer_name: r.streamer,
+        match_id: r.stream_id,
+        site: r.stream_site || r.site || '',
+        match_label: matchLabel_(r),
+        metric: ns.label,
+        metric_col: ns.col,
+        fmt: ns.fmt,
+        value: v,
+        expected: avg,
+        delta: ratio - 1,
+        ratio: ratio,
+        note: ratio.toFixed(1) + '× day avg (' + formatVal_(avg, ns.fmt) + ')',
       });
     });
   });
 
   return alerts;
+}
+
+/** Sessions in the window, deduped by (stream_id, anchor_id, stream_site_id). */
+function dedupedWindowRows_(sessions, win) {
+  const inWin = sessions.filter(function(r) { return inWindow_(r, win); });
+  const seen = {};
+  const out = [];
+  inWin.forEach(function(r) {
+    const key = (r.stream_id || '') + '|' +
+                (r.anchor_id || r.streamer_id || '') + '|' +
+                (r.stream_site_id == null ? '' : r.stream_site_id);
+    if (seen[key]) return;
+    seen[key] = true;
+    out.push(r);
+  });
+  return out;
 }
 
 function makeAlert_(a) { return a; }
@@ -671,15 +724,39 @@ function matchLabel_(s) {
 // Slack I/O
 // ============================================================
 
-function postSlack_(text) {
+function postSlack_(payloadOrText) {
   const url = PropertiesService.getScriptProperties().getProperty('SLACK_WEBHOOK_URL');
   if (!url) throw new Error('SLACK_WEBHOOK_URL not set in Script Properties');
+  const payload = typeof payloadOrText === 'string'
+    ? { text: payloadOrText }
+    : payloadOrText;
   return UrlFetchApp.fetch(url, {
     method: 'post', contentType: 'application/json',
-    payload: JSON.stringify({ text: text }),
+    payload: JSON.stringify(payload),
     muteHttpExceptions: true,
   });
 }
+
+// ============================================================
+// Block Kit helpers
+// ============================================================
+
+function bkHeader_(text) {
+  return { type: 'header', text: { type: 'plain_text', text: text, emoji: true } };
+}
+function bkSection_(mrkdwn) {
+  return { type: 'section', text: { type: 'mrkdwn', text: mrkdwn } };
+}
+function bkSectionFields_(fields) {
+  // Slack allows up to 10 fields per section.
+  return { type: 'section', fields: fields };
+}
+function bkContext_(mrkdwn) {
+  return { type: 'context', elements: [{ type: 'mrkdwn', text: mrkdwn }] };
+}
+function bkDivider_() { return { type: 'divider' }; }
+function bkField_(text) { return { type: 'mrkdwn', text: text }; }
+function bkAttachment_(color, blocks) { return { color: color, blocks: blocks }; }
 
 /** Post one or more Slack messages. Accepts string or array of strings. */
 function postSlackMessages_(parts) {
@@ -714,26 +791,28 @@ function postSlackBlocks_(text) {
 }
 
 function postAlertThread_(alerts, _parentTs) {
-  // Incoming Webhooks can't post into threads — we post a follow-up message.
-  // If you upgrade to a Slack app with chat.postMessage + thread_ts, replace this.
+  // Spike alert detail message — one bullet per (streamer × metric).
   const lines = alerts.slice(0, 30).map(function(a) {
-    return '• [' + a.severity + '] ' + (a.streamer_name || a.streamer_id) +
-           (a.match_label ? ' — ' + a.match_label : '') +
-           ' — *' + a.metric + '*: ' + a.note +
-           (a.expected !== '—' ? ' (now ' + formatVal_(a.value, a.fmt) + ', expected ' + formatVal_(a.expected, a.fmt) + ')' : '');
+    return '• ' + (a.streamer_name || a.streamer_id) +
+           (a.site ? ' (' + a.site + ')' : '') +
+           (a.match_id ? ' · Match `' + a.match_id + '`' : '') +
+           ' — *' + a.metric + '*: ' + formatVal_(a.value, a.fmt) +
+           '  _(day avg ' + formatVal_(a.expected, a.fmt) +
+           ' · ' + (a.ratio != null ? a.ratio.toFixed(1) + '×' : '') + ')_';
   });
   if (alerts.length > 30) lines.push('_…and ' + (alerts.length - 30) + ' more in Alert Log_');
-  postSlack_('*Alert detail:*\n' + lines.join('\n'));
+  postSlack_('*🚨 NS Spike Detail:*\n' + lines.join('\n'));
 }
 
 function postHighSeverityPing_(alerts) {
   const mention = PropertiesService.getScriptProperties().getProperty('SLACK_HIGH_MENTION') || '';
   const lines = alerts.map(function(a) {
     return '• ' + (a.streamer_name || a.streamer_id) +
-           (a.match_label ? ' — ' + a.match_label : '') +
-           ' — *' + a.metric + '*: ' + a.note;
+           (a.site ? ' (' + a.site + ')' : '') +
+           ' — *' + a.metric + '*: ' + formatVal_(a.value, a.fmt) +
+           ' (' + (a.ratio != null ? a.ratio.toFixed(1) + '×' : '') + ' day avg)';
   });
-  postSlack_(mention + ' *🚨 ' + alerts.length + ' high-severity alert(s):*\n' + lines.join('\n'));
+  postSlack_(mention + ' *🚨 ' + alerts.length + ' high-severity spike(s):*\n' + lines.join('\n'));
 }
 
 // ============================================================
