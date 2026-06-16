@@ -140,12 +140,6 @@ function runDaily() {
     return;
   }
 
-  // Drift check first — compare current values against the prior snapshot of
-  // the same data dates. Catches the case where the 12pm refresh silently
-  // revised yesterday's numbers.
-  const drift = evaluateDrift_(ss, sessions);
-  if (drift.length) postDriftAlerts_(drift);
-
   const alerts = evaluateAlerts_(sessions, win);
   const digest = buildDigest_(sessions, win, alerts);
 
@@ -169,10 +163,6 @@ function runDaily() {
     postSlackMessages_(weekReport);
   }
 
-  // Snapshot last N days AFTER drift check so we capture today's read for
-  // tomorrow's comparison.
-  snapshotMetrics_(ss, sessions);
-  pruneSnapshot_(ss);
 }
 
 /** Test helper — posts a sample daily digest, no thread. */
