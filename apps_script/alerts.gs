@@ -117,6 +117,10 @@ const CONFIG = {
   // row is more than SPIKE_MULTIPLIER × the day's avg of that metric.
   SPIKE_MULTIPLIER: 3,
 
+  // Pack this many match attachments into a single Slack message so 60+
+  // matches don't generate 60+ notifications.
+  MATCH_CHUNK: 10,
+
   // Block Kit color sidebars
   COLOR_OK:     '#36a64f',
   COLOR_WARN:   '#f2c744',
@@ -232,14 +236,20 @@ function buildDigest_(sessions, win, alerts) {
   const headerPayload = buildHeaderMessage_(yest, win, alerts);
   if (!yest.length) return [headerPayload];
 
-  // Each match → one message with one attachment. Keeps each Slack message
-  // small and avoids hitting block / attachment limits.
-  const matchPayloads = yest.map(function(s) {
+  // Build one attachment per match, then group into messages of MATCH_CHUNK
+  // matches each to avoid flooding Slack (60+ matches × 1 msg each is noisy).
+  const attachments = yest.map(function(s) {
     const k = (s.stream_id || '') + '|' +
               (s.anchor_id || s.streamer_id || '') + '|' +
               (s.stream_site || s.site || '');
-    return buildMatchMessage_(sessions, s, alertsByRow[k] || []);
+    return buildMatchAttachment_(sessions, s, alertsByRow[k] || []);
   });
+
+  const chunkSize = CONFIG.MATCH_CHUNK || 10;
+  const matchPayloads = [];
+  for (let i = 0; i < attachments.length; i += chunkSize) {
+    matchPayloads.push({ attachments: attachments.slice(i, i + chunkSize) });
+  }
 
   return [headerPayload].concat(matchPayloads);
 }
@@ -304,10 +314,11 @@ function buildHeaderMessage_(yest, win, alerts) {
 }
 
 /**
- * One Slack message = one match. The match is wrapped in a colored
- * attachment (green = no alert, yellow = medium, red = high).
+ * Build a single Slack Block Kit attachment for one match. Multiple
+ * attachments are then packed into one Slack message (see CONFIG.MATCH_CHUNK).
+ * Color sidebar: green = no alert, yellow = medium, red = high.
  */
-function buildMatchMessage_(sessions, s, alertsForMatch) {
+function buildMatchAttachment_(sessions, s, alertsForMatch) {
   const streamId = s.stream_id || 'n/a';
   const streamer = s.streamer || s.streamer_id || '?';
   const site = s.stream_site || s.site || 'unknown';
@@ -368,7 +379,7 @@ function buildMatchMessage_(sessions, s, alertsForMatch) {
     return bkField_('*' + kpi.label + '*\n`' + valStr + '`');
   })));
 
-  return { attachments: [bkAttachment_(color, blocks)] };
+  return bkAttachment_(color, blocks);
 }
 
 
