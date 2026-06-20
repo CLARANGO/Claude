@@ -293,4 +293,6 @@ LEFT JOIN match_dim m
  AND m.KickOffTime BETWEEN TIMESTAMP_SUB(s.start_ts, INTERVAL 1 HOUR) AND s.end_ts
 LEFT JOIN by_stream_recommend r
   ON r.streamer_id = s.anchor_id
- AND r.SabaMatchId = m.SabaMatchId;
+ AND r.SabaMatchId = m.SabaMatchId
+WHERE s.league_or_tag LIKE "*WORLD CUP 2026%"
+ORDER BY s.day;
