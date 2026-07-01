@@ -1040,11 +1040,23 @@ function windowLabel_(win, tz) {
   return fmt(win.start) + ' → ' + fmt(win.end);
 }
 
-/** True if the session's start_ts falls inside the given window. */
+/** True if the session's start_ts falls inside the given window.
+ *  Compares as Taipei-timezone strings to avoid UTC/local ambiguity when
+ *  Apps Script parses bare date strings or Sheets date serials. */
 function inWindow_(row, win) {
-  const ts = row.start_ts instanceof Date ? row.start_ts : new Date(row.start_ts);
-  if (isNaN(ts)) return false;
-  return ts >= win.start && ts < win.end;
+  let tsStr;
+  if (row.start_ts instanceof Date) {
+    // Sheets Date objects carry absolute UTC ms — format in Taipei for comparison.
+    tsStr = Utilities.formatDate(row.start_ts, CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm:ss');
+  } else {
+    const raw = String(row.start_ts).trim();
+    if (!raw || raw === 'NaN') return false;
+    tsStr = raw.slice(0, 19).replace('T', ' ');
+  }
+  if (!tsStr) return false;
+  const startStr = Utilities.formatDate(win.start, CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm:ss');
+  const endStr   = Utilities.formatDate(win.end,   CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm:ss');
+  return tsStr >= startStr && tsStr < endStr;
 }
 
 /** List of last N day-strings ending at yesterday (inclusive). */
